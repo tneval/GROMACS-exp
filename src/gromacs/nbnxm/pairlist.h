@@ -167,7 +167,8 @@ static inline int atomIndexInClusterpairSplit(const int atomIndex)
 //! Whether we want to use GPU for neighbour list sorting
 constexpr bool nbnxmSortListsOnGpu()
 {
-    return (GMX_GPU && !GMX_GPU_OPENCL);
+    return false;
+    //return (GMX_GPU && !GMX_GPU_OPENCL);
 }
 
 /*! \internal
