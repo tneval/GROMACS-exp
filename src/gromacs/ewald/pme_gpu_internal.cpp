@@ -1350,17 +1350,19 @@ static void pme_gpu_copy_common_data_from(const gmx_pme_t* pme)
  */
 static void pme_gpu_select_best_performing_pme_spreadgather_kernels(PmeGpu* pmeGpu)
 {
-    if (gmx::GpuConfigurationCapabilities::PmeSupportsThreadsPerAtomOrder
+    //printf("#######  pme_gpu_select_best_performeing_pme_spreadgather_kernels\n");
+    //printf("####### pmeGpu->kernelParams->atoms.nAtoms: %d ; pmeGpu->minParticleCountToRecalculateSplines: %d\n", pmeGpu->kernelParams->atoms.nAtoms, pmeGpu->minParticleCountToRecalculateSplines);
+    /* if (gmx::GpuConfigurationCapabilities::PmeSupportsThreadsPerAtomOrder
         && pmeGpu->kernelParams->atoms.nAtoms > pmeGpu->minParticleCountToRecalculateSplines)
     {
         pmeGpu->settings.threadsPerAtom     = ThreadsPerAtom::Order;
         pmeGpu->settings.recalculateSplines = true;
     }
     else
-    {
+    { */
         pmeGpu->settings.threadsPerAtom     = ThreadsPerAtom::OrderSquared;
         pmeGpu->settings.recalculateSplines = false;
-    }
+    //}
 }
 
 

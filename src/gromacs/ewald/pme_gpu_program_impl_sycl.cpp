@@ -75,7 +75,7 @@ static int chooseSubGroupSizeForDevice(const DeviceInformation& deviceInfo)
         switch (deviceInfo.deviceVendor)
         {
             case DeviceVendor::Intel: return 16; // TODO: Choose best value, Issue #4153.
-            //case DeviceVendor::PoclCpu: return 16;
+            //case DeviceVendor::PoclCpu: return 16; This should match to what is se at pocl side.
             case DeviceVendor::PoclCpu: return 32;
             default:
                 GMX_RELEASE_ASSERT(false, "Flexible sub-groups only supported for Intel GPUs");
