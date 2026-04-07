@@ -775,9 +775,16 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 sm_prunedPairCountHostStorage, sm_prunedPairCountDeviceStorage);
 
         /* thread/block/warp id-s */
-        const unsigned tidxi = itemIdx.get_local_id(2);
+        /* const unsigned tidxi = itemIdx.get_local_id(2);
         const unsigned tidxj = itemIdx.get_local_id(1);
-        const unsigned tidx  = tidxj * c_clSize + tidxi;
+        const unsigned tidx  = tidxj * c_clSize + tidxi; */
+
+        // This should work for the linearized kernel (64x1x1). Has to force dimensions from launch
+        const unsigned tidx = itemIdx.get_local_linear_id();
+        const unsigned tidxi = tidx % c_clSize;
+        const unsigned tidxj = tidx / c_clSize;
+        // END linear conversion
+
 
         const unsigned bidx = itemIdx.get_group(2);
 
@@ -1276,7 +1283,11 @@ static void launchNbnxmKernel(const DeviceStream& deviceStream, const int numSci
      */
     constexpr int           c_clSize  = sc_gpuClusterSize(sc_layoutType);
     const int               numBlocks = numSci;
-    const sycl::range<3>    blockSize{ 1, c_clSize, c_clSize };
+    // Linear Conversion:
+    const sycl::range<3>    blockSize{ 1, 1, c_clSize * c_clSize };
+    // End Linear Conversion
+
+    //const sycl::range<3>    blockSize{ 1, c_clSize, c_clSize };
     const sycl::range<3>    globalSize{ blockSize[0], blockSize[1], numBlocks * blockSize[2] };
     const sycl::nd_range<3> range{ globalSize, blockSize };
 
