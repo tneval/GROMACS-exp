@@ -51,6 +51,60 @@
 #include "nbnxm_sycl_kernel_utils.h"
 #include "nbnxm_sycl_types.h"
 
+// This setup: 1k steps
+// PoCL (pthreads):
+// 1 CPU: 2.043s, All CPU: 0.896s
+// Intel:
+// 1 CPU: 16.33s, All CPU: 0.944s
+
+/*
+#define MAIN_LOOP
+//#define REDUCE_I
+#define REDUCE_FORCE_J
+#define GROUP_REDUCE
+#define INNER_FOR
+//#define INNERMOST_IF
+*/
+
+
+
+// This setup: 1k steps
+// This setup: 1k steps
+// PoCL (pthreads):
+// 1 CPU: 2.446s, All CPU: 1.011s
+// Intel:
+// 1 CPU: 28.211s, All CPU: 1.252s
+
+
+/*
+#define MAIN_LOOP
+#define REDUCE_I
+#define REDUCE_FORCE_J
+#define GROUP_REDUCE
+#define INNER_FOR
+//#define INNERMOST_IF
+*/
+
+
+#define MAIN_LOOP
+//#define REDUCE_I
+#define REDUCE_FORCE_J
+//#define GROUP_REDUCE
+//#define INNER_FOR
+//#define INNERMOST_IF
+//#define CONDITIONAL_MASK
+
+#define DO_CALC_ENERGIES
+#define ELEC_CUTOFF
+#define ACCUMULATE_FORCES
+
+
+//#define FLATTENED_GRID
+
+#define FLATTEN
+
+//#define DPCPP
+
 namespace gmx
 {
 
@@ -138,15 +192,48 @@ static inline void reduceForceJAmdDpp(Float3 f, const int tidxi, const int aidx,
  * c_clSize consecutive threads hold the force components of a j-atom which we
  * reduced in log2(cl_Size) steps using shift and atomically accumulate them into \p a_f.
  */
+#ifdef FLATTEN
+static inline void reduceForceJShuffle(float f_x, float f_y, float f_z,
+#else
 static inline void reduceForceJShuffle(Float3                   f,
+#endif
                                        const sycl::nd_item<3>&  itemIdx,
                                        const int                tidxi,
                                        const int                aidx,
                                        sycl::global_ptr<Float3> a_f)
 {
+
     constexpr int c_clSize = sc_gpuClusterSize(sc_layoutType);
     static_assert(c_clSize == 8 || c_clSize == 4);
     sycl::sub_group sg = itemIdx.get_sub_group();
+
+#ifdef FLATTEN
+    f_x += sycl::shift_group_left(sg, f_x, 1);
+    f_y += sycl::shift_group_right(sg, f_y, 1);
+    f_z += sycl::shift_group_left(sg, f_z, 1);
+
+    if (tidxi & 1)
+    {
+        f_x = f_y;
+    }
+    f_x += sycl::shift_group_left(sg, f_x, 2);
+    f_z += sycl::shift_group_right(sg, f_z, 2);
+    if (tidxi & 2)
+    {
+        f_x = f_z;
+    }
+    if constexpr (c_clSize == 8)
+    {
+        f_x += sycl::shift_group_left(sg, f_x, 4);
+    }
+
+
+    if (tidxi < 3)
+    {
+        atomicFetchAdd(a_f[aidx][tidxi], f_x);
+    }
+#else
+
 
     f[0] += sycl::shift_group_left(sg, f[0], 1);
     f[1] += sycl::shift_group_right(sg, f[1], 1);
@@ -172,6 +259,7 @@ static inline void reduceForceJShuffle(Float3                   f,
     {
         atomicFetchAdd(a_f[aidx][tidxi], f[0]);
     }
+#endif
 }
 
 /*!
@@ -260,14 +348,20 @@ static inline void reduceForceJGeneric(sycl::local_ptr<float>   sm_buf,
  */
 template<bool useShuffleReduction>
 static inline void reduceForceJ(sycl::local_ptr<float>   sm_buf,
+#ifdef FLATTEN
+                                float f_x,
+                                float f_y,
+                                float f_z,
+#else
                                 Float3                   f,
+#endif
                                 const sycl::nd_item<3>   itemIdx,
                                 const int                tidxi,
                                 const int                tidxj,
                                 const int                aidx,
                                 sycl::global_ptr<Float3> a_f)
 {
-    if constexpr (!useShuffleReduction)
+    /* if constexpr (!useShuffleReduction)
     {
         reduceForceJGeneric(sm_buf, f, itemIdx, tidxi, tidxj, aidx, a_f);
     }
@@ -275,10 +369,15 @@ static inline void reduceForceJ(sycl::local_ptr<float>   sm_buf,
     {
 #if defined(__SYCL_DEVICE_ONLY__) && defined(__AMDGCN__)
         reduceForceJAmdDpp(f, tidxi, aidx, a_f);
+#else */
+#ifdef FLATTEN
+        reduceForceJShuffle(f_x, f_y, f_z, itemIdx, tidxi, aidx, a_f);
 #else
         reduceForceJShuffle(f, itemIdx, tidxi, aidx, a_f);
 #endif
-    }
+
+/* #endif
+    } */
 }
 
 /*! \brief Local memory-based i-force reduction.
@@ -689,6 +788,8 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                         const float           coulombTabScale,
                         const bool            calcShift)
 {
+    //printf("##### SUBGROUP SIZE IS: %d\n", subGroupSize);
+
     static constexpr EnergyFunctionProperties<elecType, vdwType> props;
 
     constexpr int          c_clSize               = sc_gpuClusterSize(sc_layoutType);
@@ -717,7 +818,12 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
     constexpr bool useShuffleReductionForceJ = gmx::isPowerOfTwo(c_superClusterSize);
 
     // Local memory buffer for i x+q pre-loading
+
+#ifdef FLATTEN
+    using Xq        = StaticLocalStorage<float, c_superClusterSize * c_clSize *4>;
+#else
     using Xq        = StaticLocalStorage<Float4, c_superClusterSize * c_clSize>;
+#endif
     using AtomTypeI = StaticLocalStorage<int, c_superClusterSize * c_clSize, !props.vdwComb>;
     using LjCombI   = StaticLocalStorage<Float2, c_superClusterSize * c_clSize, props.vdwComb>;
     auto sm_xqHostStorage        = Xq::makeHostStorage(cgh);
@@ -752,10 +858,10 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
     return [=](sycl::nd_item<3> itemIdx) [[sycl::reqd_sub_group_size(subGroupSize)]]
     {
-        if constexpr (skipKernelCompilation<subGroupSize>())
+        /* if constexpr (skipKernelCompilation<subGroupSize>())
         {
             return;
-        }
+        } */
 
         // These declarations work on the device.
         typename Xq::DeviceStorage              sm_xqDeviceStorage;
@@ -764,7 +870,11 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         typename ReductionBuffer::DeviceStorage sm_reductionBufferDeviceStorage;
         typename PrunedPairCount::DeviceStorage sm_prunedPairCountDeviceStorage;
         // Extract the valid pointer to local storage
+#ifdef FLATTEN
+        sycl::local_ptr<float> sm_xq = Xq::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
+#else
         sycl::local_ptr<Float4> sm_xq = Xq::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
+#endif
         sycl::local_ptr<int>    sm_atomTypeI =
                 AtomTypeI::get_pointer(sm_atomTypeIHostStorage, sm_atomTypeIDeviceStorage);
         sycl::local_ptr<Float2> sm_ljCombI =
@@ -774,17 +884,22 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         sycl::local_ptr<int> sm_prunedPairCount = PrunedPairCount::get_pointer(
                 sm_prunedPairCountHostStorage, sm_prunedPairCountDeviceStorage);
 
+#ifdef FLATTENED_GRID
+        // This should work for the linearized kernel (64x1x1). Has to force dimensions from launch
+        const unsigned tidx = itemIdx.get_local_linear_id();
+        const unsigned tidxi = tidx % c_clSize;
+        const unsigned tidxj = tidx / c_clSize;
+#else
         /* thread/block/warp id-s */
         /* const unsigned tidxi = itemIdx.get_local_id(2);
         const unsigned tidxj = itemIdx.get_local_id(1);
         const unsigned tidx  = tidxj * c_clSize + tidxi; */
 
-        // This should work for the linearized kernel (64x1x1). Has to force dimensions from launch
         const unsigned tidx = itemIdx.get_local_linear_id();
-        const unsigned tidxi = tidx % c_clSize;
-        const unsigned tidxj = tidx / c_clSize;
-        // END linear conversion
+        const unsigned tidxi = tidx % 8;
+        const unsigned tidxj = tidx / 8;
 
+#endif
 
         const unsigned bidx = itemIdx.get_group(2);
 
@@ -836,7 +951,22 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 Float4       xqi   = gm_xq[ai];
                 xqi += Float4(shift[0], shift[1], shift[2], 0.0F);
                 xqi[3] *= epsFac;
+#ifdef FLATTEN
+                sm_xq[cacheIdx] = xqi[0];
+                sm_xq[cacheIdx+1] = xqi[1];
+                sm_xq[cacheIdx+2] = xqi[2];
+#else
                 sm_xq[cacheIdx] = xqi;
+#endif
+
+
+
+/* #ifdef DPCPP
+                if(bidx == 0){
+                    sycl::ext::oneapi::experimental::printf("(%d,%d): i:%d\tc_clSize = %d\tc_superClusterSize = %d\tsci = %d\tci = %d\tai = %d\tcacheIdx = %d\t\n", tidxi, tidxj, i, c_clSize, c_superClusterSize, sci, ci, ai, cacheIdx);
+                }
+#endif */
+
 
                 if constexpr (!props.vdwComb)
                 {
@@ -845,7 +975,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 }
                 else
                 {
-                    // Pre-load the LJ combination parameters into shared memory
+                    // Pre-load the LJ combination parameters into shared memory4
                     sm_ljCombI[cacheIdx] = gm_ljComb[ai];
                 }
             }
@@ -885,7 +1015,11 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                     // TODO: Are there other options?
                     if constexpr (props.elecEwald || props.elecRF || props.elecCutoff)
                     {
+#ifdef FLATTEN
+                        const float qi = sm_xq[(i * c_clSize + tidxi)+3];
+#else
                         const float qi = sm_xq[i * c_clSize + tidxi][3];
+#endif
                         energyElec += qi * qi;
                     }
                     if constexpr (props.vdwEwald)
@@ -894,7 +1028,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                                              * (numTypes + 1)][0];
                     }
                 }
-                /* divide the self term(s) equally over the j-threads, then multiply with the coefficients. */
+                //divide the self term(s) equally over the j-threads, then multiply with the coefficients.
                 if constexpr (props.vdwEwald)
                 {
                     energyVdw /= c_clSize;
@@ -902,15 +1036,15 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 }
                 if constexpr (props.elecRF || props.elecCutoff)
                 {
-                    // Correct for epsfac^2 due to adding qi^2 */
+                    // Correct for epsfac^2 due to adding qi^2
                     energyElec /= epsFac * c_clSize;
                     energyElec *= -0.5F * cRF;
                 }
                 if constexpr (props.elecEwald)
                 {
-                    // Correct for epsfac^2 due to adding qi^2 */
+                    // Correct for epsfac^2 due to adding qi^2
                     energyElec /= epsFac * c_clSize;
-                    energyElec *= -ewaldBeta * c_oneOverSqrtPi; /* last factor 1/sqrt(pi) */
+                    energyElec *= -ewaldBeta * c_oneOverSqrtPi;
                 }
             } // (nbSci.shift == gmx::c_centralShiftIndex && a_plistCJPacked[cijPackedBegin].cj[0] == sci * c_nbnxnGpuNumClusterPerSupercluster)
         } // (doCalcEnergies && doExclusionForces)
@@ -919,9 +1053,19 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         // Note that we use & instead of && for performance (benchmarked in 2017)
         const bool nonSelfInteraction = !(nbSci.shift == gmx::c_centralShiftIndex & tidxj <= tidxi);
 
+
+
         // loop over the j clusters = seen by any of the atoms in the current super-cluster
+#ifdef MAIN_LOOP
         for (int jPacked = cijPackedBegin; jPacked < cijPackedEnd; jPacked += 1)
         {
+#ifdef DPCPP
+            if(bidx == 0 && tidx == 0){
+                sycl::ext::oneapi::experimental::printf("cijPackedBegin: %d\tcijPackedEnd: %d\n",cijPackedBegin, cijPackedEnd);
+            }
+#endif
+
+
             nbnxn_cj_packed_t* plistCJPacked = indexedAddress(gm_plistCJPacked, jPacked);
             unsigned imask = UNIFORM_LOAD_CLUSTER_PAIR_DATA(plistCJPacked->imei[imeiIdx].imask);
             if (!doPruneNBL && !imask)
@@ -987,12 +1131,26 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 {
                     atomTypeJ = *indexedAddress(gm_atomTypes, aj);
                 }
-
+#ifdef FLATTEN
+                float f_x = 0.0F;
+                float f_y = 0.0F;
+                float f_z = 0.0F;
+#else
                 Float3 fCjBuf(0.0F, 0.0F, 0.0F);
+#endif
 
-#pragma unroll c_superClusterSize
+#ifdef INNER_FOR
+//#pragma unroll c_superClusterSize
                 for (int i = 0; i < c_superClusterSize; i++)
                 {
+
+#ifdef DPCPP
+                    if(bidx == 0 && tidx == 0){
+                        sycl::ext::oneapi::experimental::printf("jpacked: %d\tjm: %d\ti: %d\n",jPacked, jm,i);
+                    }
+#endif
+
+#ifdef CONDITIONAL_MASK
                     if (imask & maskJI)
                     {
                         // i cluster index
@@ -1007,9 +1165,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
                         if constexpr (doPruneNBL)
                         {
-                            /* If _none_ of the atoms pairs are in cutoff range,
-                             * the bit corresponding to the current
-                             * cluster-pair in imask gets set to 0. */
+
                             if (!sycl::any_of_group(sg, r2 < rlistOuterSq))
                             {
                                 imask &= ~maskJI;
@@ -1022,10 +1178,10 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                         const bool notExcluded = doExclusionForces ? (nonSelfInteraction | (ci != cj))
                                                                    : (wexcl & maskJI);
 
+#ifdef INNERMOST_IF
+
 #if defined(__SYCL_CUDA_ARCH__)
-                        /* The use of * was benchmarked in 2024 for DPC++ 2024.1 CUDA and
-                         * found to be faster than the use of &&, just like for CUDA.
-                         * "&&" is still better for Intel and AMD devices. */
+
                         if ((r2 < rCoulombSq) * notExcluded)
 #else // Intel and AMD paths
                         if ((r2 < rCoulombSq) && notExcluded)
@@ -1038,7 +1194,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
                             if constexpr (!props.vdwComb)
                             {
-                                /* LJ 6*C6 and 12*C12 */
+
                                 atomTypeI = sm_atomTypeI[i * c_clSize + tidxi];
                                 c6c12 = *indexedAddress(gm_nbfp, numTypes * atomTypeI + atomTypeJ);
                             }
@@ -1083,8 +1239,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                                 if constexpr (doExclusionForces)
                                 {
                                     // SYCL-TODO: Check if true for SYCL
-                                    /* We could mask r2Inv, but with Ewald masking both
-                                     * r6Inv and fInvR is faster */
+
                                     r6Inv *= pairExclMask;
                                 }
                                 fInvR = r6Inv * (c12 * r6Inv - c6) * r2Inv;
@@ -1145,7 +1300,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             {
                                 energyVdw += energyLJPair;
                             }
-
+#ifdef ELEC_CUTOFF
                             if constexpr (props.elecCutoff)
                             {
                                 if constexpr (doExclusionForces)
@@ -1157,6 +1312,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                                     fInvR += qi * qj * r2Inv * rInv;
                                 }
                             }
+#endif
                             if constexpr (props.elecRF)
                             {
                                 fInvR += qi * qj * (pairExclMask * r2Inv * rInv - twoKRf);
@@ -1174,7 +1330,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                                                     gm_coulombTab, coulombTabScale, r2 * rInv))
                                          * rInv;
                             }
-
+#ifdef DO_CALC_ENERGIES
                             if constexpr (doCalcEnergies)
                             {
                                 if constexpr (props.elecCutoff)
@@ -1193,12 +1349,14 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                                                      - pairExclMask * ewaldShift);
                                 }
                             }
+#endif
 
+#ifdef ACCUMULATE_FORCES
                             const Float3 forceIJ = rv * fInvR;
-
-                            /* accumulate j forces in registers */
+                            //sycl::ext::oneapi::experimental::printf("%d\n",forceIJ[0]);
+                            // accumulate j forces in registers
                             fCjBuf -= forceIJ;
-                            /* accumulate i forces in registers */
+                            // accumulate i forces in registers
 #if defined(__SYCL_DEVICE_ONLY__) && defined(__AMDGCN__)
                             fCiBuf_[i] += FCiFloat3(forceIJ);
 #else
@@ -1206,19 +1364,31 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             fCiBufY(i) += forceIJ[1];
                             fCiBufZ(i) += forceIJ[2];
 #endif
+#endif
                         } // (r2 < rCoulombSq) && notExcluded
+#endif
                     } // (imask & maskJI)
-                    /* shift the mask bit by 1 */
+#endif
+                    // shift the mask bit by 1
                     maskJI += maskJI;
                 } // for (int i = 0; i < c_nbnxnGpuNumClusterPerSupercluster; i++)
-                /* reduce j forces */
+#endif
+#ifdef REDUCE_FORCE_J
+                // reduce j forces
+#ifdef FLATTEN
+                reduceForceJ<useShuffleReductionForceJ>(
+                        sm_reductionBuffer, f_x, f_y, f_z, itemIdx, tidxi, tidxj, aj, gm_f);
+#else
+
                 reduceForceJ<useShuffleReductionForceJ>(
                         sm_reductionBuffer, fCjBuf, itemIdx, tidxi, tidxj, aj, gm_f);
+#endif
+
+#endif
             } // for (int jm = 0; jm < c_nbnxnGpuJgroupSize; jm++)
             if constexpr (doPruneNBL)
             {
-                /* Update the imask with the new one which does not contain the
-                 * out of range clusters anymore. */
+
                 plistCJPacked->imei[imeiIdx].imask = imask;
                 if constexpr (nbnxmSortListsOnGpu())
                 {
@@ -1226,13 +1396,16 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 }
             }
         } // for (int jPacked = cijPackedBegin; jPacked < cijPackedEnd; jPacked += 1)
+#endif // MAIN-LOOP
 
-        /* skip central shifts when summing shift forces */
         const bool doCalcShift = (calcShift && nbSci.shift != gmx::c_centralShiftIndex);
 
+#ifdef REDUCE_I
         reduceForceIAndFShift<useShuffleReductionForceI, subGroupSize>(
                 sm_reductionBuffer, fCiBufX, fCiBufY, fCiBufZ, doCalcShift, itemIdx, tidxi, tidxj, sci, nbSci.shift, gm_f, gm_fShift);
+#endif
 
+#ifdef GROUP_REDUCE
         if constexpr (doCalcEnergies)
         {
             const float energyVdwGroup =
@@ -1247,12 +1420,10 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 atomicFetchAdd(gm_energyElec[0], energyElecGroup);
             }
         }
+#endif
         if constexpr (doPruneNBL && nbnxmSortListsOnGpu())
         {
-            /* aggregate neighbour counts, to be used in bucket sci sort */
-            /* One thread in each warp contributes the count for that warp as soon as it reaches
-             * here. Masks are calculated per warp in a warp synchronising operation, so no
-             * syncthreads required here. */
+
             if (sg.leader())
             {
                 atomicFetchAddLocal(sm_prunedPairCount[0], prunedPairCount);
@@ -1283,11 +1454,17 @@ static void launchNbnxmKernel(const DeviceStream& deviceStream, const int numSci
      */
     constexpr int           c_clSize  = sc_gpuClusterSize(sc_layoutType);
     const int               numBlocks = numSci;
+
+#ifdef FLATTENED_GRID
     // Linear Conversion:
     const sycl::range<3>    blockSize{ 1, 1, c_clSize * c_clSize };
-    // End Linear Conversion
-
+#else
     //const sycl::range<3>    blockSize{ 1, c_clSize, c_clSize };
+
+
+    const sycl::range<3>    blockSize{ 1, 2, 8 };
+#endif
+
     const sycl::range<3>    globalSize{ blockSize[0], blockSize[1], numBlocks * blockSize[2] };
     const sycl::nd_range<3> range{ globalSize, blockSize };
 
@@ -1319,6 +1496,10 @@ void launchNbnxmKernelHelper(NbnxmGpu* nb, const gmx::StepWorkload& stepWork, co
     NBParamGpu*         nbp          = nb->nbparam;
     auto*               plist        = nb->plist[iloc].get();
     const DeviceStream& deviceStream = *nb->deviceStreams[iloc];
+
+    //auto* a = plist->sci.get_pointer();
+    //std::cout << "begin: " << a->cjPackedBegin << "\n";
+    //std::cout << "end: " << a->cjPackedEnd << "\n";
 
     GMX_ASSERT(doPruneNBL == (plist->haveFreshList && !nb->didPrune[iloc]), "Wrong template called");
     GMX_ASSERT(doCalcEnergies == stepWork.computeEnergy, "Wrong template called");

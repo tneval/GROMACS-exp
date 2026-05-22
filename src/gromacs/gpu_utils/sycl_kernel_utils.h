@@ -136,6 +136,7 @@ constexpr bool compilingForSubGroupSize()
 template<int expectedSubGroupSize>
 constexpr bool skipKernelCompilation()
 {
+    return false;
     if constexpr (compilingForHost())
     {
         return true;

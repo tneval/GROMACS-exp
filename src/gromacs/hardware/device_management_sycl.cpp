@@ -498,6 +498,7 @@ static std::optional<sycl::backend> chooseBestBackend(const std::vector<std::uni
 
 static std::vector<sycl::device> partitionDevices(const std::vector<sycl::device>&& devices)
 {
+    return devices;
 #if GMX_SYCL_DPCPP
     std::vector<sycl::device> retVal;
     for (const auto& device : devices)
@@ -592,11 +593,16 @@ std::vector<std::unique_ptr<DeviceInformation>> findDevices()
         {
             deviceInfos[i]->deviceVendor = DeviceVendor::PoclCpu;
         }
-        else
+        /* else
         {
             deviceInfos[i]->deviceVendor =
                     getDeviceVendor(syclDevice.get_info<sycl::info::device::vendor>().c_str());
+        } */
+        if (syclDevice.is_cpu())
+        {
+            deviceInfos[i]->deviceVendor = DeviceVendor::PoclCpu;
         }
+
 
         deviceInfos[i]->gpuAwareMpiStatus = getDeviceGpuAwareMpiStatus(syclDevice.get_backend());
 
@@ -615,7 +621,10 @@ std::vector<std::unique_ptr<DeviceInformation>> findDevices()
                     GMX_RELEASE_ASSERT(deviceInfos[i]->supportedSubGroupSizes.size()
                                                < deviceInfos[i]->supportedSubGroupSizes.capacity(),
                                        "Device supports too many subgroup sizes");
-                    deviceInfos[i]->supportedSubGroupSizes.push_back(sgSize);
+                    if(sgSize < 128){
+                        deviceInfos[i]->supportedSubGroupSizes.push_back(sgSize);
+                    }
+
                 }
             }
         }
