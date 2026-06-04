@@ -84,7 +84,7 @@ auto makeSolveKernel(CommandGroupHandler cgh,
      * depending on the grid contiguous dimension size,
      * that can range from a part of a single gridline to several complete gridlines.
      */
-    return [=](sycl::nd_item<3> itemIdx) [[sycl::reqd_sub_group_size(subGroupSize)]]
+    return [=](sycl::nd_item<3> itemIdx) GMX_PME_SYCL_REQD_SUB_GROUP_SIZE(subGroupSize)
     {
         if constexpr (skipKernelCompilation<subGroupSize>())
         {
@@ -298,93 +298,120 @@ auto makeSolveKernel(CommandGroupHandler cgh,
             const int width = subGroupSize;
             static_assert(subGroupSize >= 8);
 
-            sycl::sub_group sg = itemIdx.get_sub_group();
-
-            /* Making pair sums */
-            virxx += sycl::shift_group_left(sg, virxx, 1);
-            viryy += sycl::shift_group_right(sg, viryy, 1);
-            virzz += sycl::shift_group_left(sg, virzz, 1);
-            virxy += sycl::shift_group_right(sg, virxy, 1);
-            virxz += sycl::shift_group_left(sg, virxz, 1);
-            viryz += sycl::shift_group_right(sg, viryz, 1);
-            energy += sycl::shift_group_left(sg, energy, 1);
-            if (threadLocalId & 1)
+            if constexpr (GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET)
             {
-                virxx = viryy; // virxx now holds virxx and viryy pair sums
-                virzz = virxy; // virzz now holds virzz and virxy pair sums
-                virxz = viryz; // virxz now holds virxz and viryz pair sums
-            }
-
-            /* Making quad sums */
-            virxx += sycl::shift_group_left(sg, virxx, 2);
-            virzz += sycl::shift_group_right(sg, virzz, 2);
-            virxz += sycl::shift_group_left(sg, virxz, 2);
-            energy += sycl::shift_group_right(sg, energy, 2);
-            if (threadLocalId & 2)
-            {
-                virxx = virzz; // virxx now holds quad sums of virxx, virxy, virzz and virxy
-                virxz = energy; // virxz now holds quad sums of virxz, viryz, energy and unused paddings
-            }
-
-            /* Making octet sums */
-            virxx += sycl::shift_group_left(sg, virxx, 4);
-            virxz += sycl::shift_group_right(sg, virxz, 4);
-            if (threadLocalId & 4)
-            {
-                virxx = virxz; // virxx now holds all 7 components' octet sums + unused paddings
-            }
-
-            /* We only need to reduce virxx now */
-#pragma unroll
-            for (int delta = 8; delta < width; delta <<= 1)
-            {
-                virxx += sycl::shift_group_left(sg, virxx, delta);
-            }
-            /* Now first 7 threads of each warp have the full output contributions in virxx */
-
-            const int  componentIndex      = threadLocalId & (subGroupSize - 1);
-            const bool validComponentIndex = (componentIndex < c_virialAndEnergyCount);
-
-            if (validComponentIndex)
-            {
-                const int warpIndex = threadLocalId / subGroupSize;
-                sm_virialAndEnergy[warpIndex * stride + componentIndex] = virxx;
-            }
-            itemIdx.barrier(sycl::access::fence_space::local_space);
-
-            /* Reduce to the single warp size */
-            const int targetIndex = threadLocalId;
-#pragma unroll
-            for (int reductionStride = reductionBufferSize >> 1; reductionStride >= subGroupSize;
-                 reductionStride >>= 1)
-            {
-                const int sourceIndex = targetIndex + reductionStride;
-                if ((targetIndex < reductionStride) & (sourceIndex < activeWarps * stride))
+                if (threadLocalId < stride)
                 {
-                    sm_virialAndEnergy[targetIndex] += sm_virialAndEnergy[sourceIndex];
+                    sm_virialAndEnergy[threadLocalId] = 0.0F;
                 }
                 itemIdx.barrier(sycl::access::fence_space::local_space);
-            }
 
-            /* Now use shuffle again */
-            /* NOTE: This reduction assumes there are at least 4 warps (asserted).
-             *       To use fewer warps, add to the conditional:
-             *       && threadLocalId < activeWarps * stride
-             */
-            SYCL_ASSERT(activeWarps * stride >= subGroupSize);
-            if (threadLocalId < subGroupSize)
-            {
-                float output = sm_virialAndEnergy[threadLocalId];
-#pragma unroll
-                for (int delta = stride; delta < subGroupSize; delta <<= 1)
+                atomicFetchAddLocal(sm_virialAndEnergy[0], virxx);
+                atomicFetchAddLocal(sm_virialAndEnergy[1], viryy);
+                atomicFetchAddLocal(sm_virialAndEnergy[2], virzz);
+                atomicFetchAddLocal(sm_virialAndEnergy[3], virxy);
+                atomicFetchAddLocal(sm_virialAndEnergy[4], virxz);
+                atomicFetchAddLocal(sm_virialAndEnergy[5], viryz);
+                atomicFetchAddLocal(sm_virialAndEnergy[6], energy);
+                itemIdx.barrier(sycl::access::fence_space::local_space);
+
+                if (threadLocalId < c_virialAndEnergyCount)
                 {
-                    output += sycl::shift_group_left(sg, output, delta);
+                    const float output = sm_virialAndEnergy[threadLocalId];
+                    SYCL_ASSERT(sycl::isfinite(output));
+                    atomicFetchAdd(gm_virialAndEnergy[threadLocalId], output);
                 }
-                /* Final output */
+            }
+            else
+            {
+                auto sg = GMX_PME_SYCL_KERNEL_GROUP(itemIdx);
+
+                /* Making pair sums */
+                virxx += sycl::shift_group_left(sg, virxx, 1);
+                viryy += sycl::shift_group_right(sg, viryy, 1);
+                virzz += sycl::shift_group_left(sg, virzz, 1);
+                virxy += sycl::shift_group_right(sg, virxy, 1);
+                virxz += sycl::shift_group_left(sg, virxz, 1);
+                viryz += sycl::shift_group_right(sg, viryz, 1);
+                energy += sycl::shift_group_left(sg, energy, 1);
+                if (threadLocalId & 1)
+                {
+                    virxx = viryy; // virxx now holds virxx and viryy pair sums
+                    virzz = virxy; // virzz now holds virzz and virxy pair sums
+                    virxz = viryz; // virxz now holds virxz and viryz pair sums
+                }
+
+                /* Making quad sums */
+                virxx += sycl::shift_group_left(sg, virxx, 2);
+                virzz += sycl::shift_group_right(sg, virzz, 2);
+                virxz += sycl::shift_group_left(sg, virxz, 2);
+                energy += sycl::shift_group_right(sg, energy, 2);
+                if (threadLocalId & 2)
+                {
+                    virxx = virzz; // virxx now holds quad sums of virxx, virxy, virzz and virxy
+                    virxz = energy; // virxz now holds quad sums of virxz, viryz, energy and unused paddings
+                }
+
+                /* Making octet sums */
+                virxx += sycl::shift_group_left(sg, virxx, 4);
+                virxz += sycl::shift_group_right(sg, virxz, 4);
+                if (threadLocalId & 4)
+                {
+                    virxx = virxz; // virxx now holds all 7 components' octet sums + unused paddings
+                }
+
+                /* We only need to reduce virxx now */
+#pragma unroll
+                for (int delta = 8; delta < width; delta <<= 1)
+                {
+                    virxx += sycl::shift_group_left(sg, virxx, delta);
+                }
+                /* Now first 7 threads of each warp have the full output contributions in virxx */
+
+                const int  componentIndex      = threadLocalId & (subGroupSize - 1);
+                const bool validComponentIndex = (componentIndex < c_virialAndEnergyCount);
+
                 if (validComponentIndex)
                 {
-                    SYCL_ASSERT(sycl::isfinite(output));
-                    atomicFetchAdd(gm_virialAndEnergy[componentIndex], output);
+                    const int warpIndex = threadLocalId / subGroupSize;
+                    sm_virialAndEnergy[warpIndex * stride + componentIndex] = virxx;
+                }
+                itemIdx.barrier(sycl::access::fence_space::local_space);
+
+                /* Reduce to the single warp size */
+                const int targetIndex = threadLocalId;
+#pragma unroll
+                for (int reductionStride = reductionBufferSize >> 1; reductionStride >= subGroupSize;
+                     reductionStride >>= 1)
+                {
+                    const int sourceIndex = targetIndex + reductionStride;
+                    if ((targetIndex < reductionStride) & (sourceIndex < activeWarps * stride))
+                    {
+                        sm_virialAndEnergy[targetIndex] += sm_virialAndEnergy[sourceIndex];
+                    }
+                    itemIdx.barrier(sycl::access::fence_space::local_space);
+                }
+
+                /* Now use shuffle again */
+                /* NOTE: This reduction assumes there are at least 4 warps (asserted).
+                 *       To use fewer warps, add to the conditional:
+                 *       && threadLocalId < activeWarps * stride
+                 */
+                SYCL_ASSERT(activeWarps * stride >= subGroupSize);
+                if (threadLocalId < subGroupSize)
+                {
+                    float output = sm_virialAndEnergy[threadLocalId];
+#pragma unroll
+                    for (int delta = stride; delta < subGroupSize; delta <<= 1)
+                    {
+                        output += sycl::shift_group_left(sg, output, delta);
+                    }
+                    /* Final output */
+                    if (validComponentIndex)
+                    {
+                        SYCL_ASSERT(sycl::isfinite(output));
+                        atomicFetchAdd(gm_virialAndEnergy[componentIndex], output);
+                    }
                 }
             }
         }

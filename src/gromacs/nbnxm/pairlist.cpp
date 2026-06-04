@@ -3604,7 +3604,11 @@ static void sort_sci(NbnxnPairlistGpu* nbl)
     }
 
     /* Swap the sci pointers so we use the new, sorted list */
+#if GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET
+    std::copy(work.sci_sort.begin(), work.sci_sort.end(), nbl->sci.begin());
+#else
     std::swap(nbl->sci, work.sci_sort);
+#endif
 }
 
 /* Returns the i-zone range for pairlist construction for the give locality */

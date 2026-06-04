@@ -66,7 +66,12 @@ constexpr int c_stateB = 1;
 
 static int chooseSubGroupSizeForDevice(const DeviceInformation& deviceInfo)
 {
-    if (deviceInfo.supportedSubGroupSizes.size() == 1)
+    if constexpr (GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET)
+    {
+        GMX_UNUSED_VALUE(deviceInfo);
+        return 16;
+    }
+    else if (deviceInfo.supportedSubGroupSizes.size() == 1)
     {
         return deviceInfo.supportedSubGroupSizes[0];
     }
@@ -212,11 +217,14 @@ PmeGpuProgramImpl::PmeGpuProgramImpl(const DeviceContext& deviceContext) :
     // kernel parameters
     const DeviceInformation& deviceInfo = deviceContext.deviceInfo();
     warpSize_                           = chooseSubGroupSizeForDevice(deviceInfo);
-    GMX_RELEASE_ASSERT(std::find(deviceInfo.supportedSubGroupSizes.begin(),
-                                 deviceInfo.supportedSubGroupSizes.end(),
-                                 warpSize_)
-                               != deviceInfo.supportedSubGroupSizes.end(),
-                       "Device does not support selected sub-group size");
+    if constexpr (!(GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET))
+    {
+        GMX_RELEASE_ASSERT(std::find(deviceInfo.supportedSubGroupSizes.begin(),
+                                     deviceInfo.supportedSubGroupSizes.end(),
+                                     warpSize_)
+                                   != deviceInfo.supportedSubGroupSizes.end(),
+                           "Device does not support selected sub-group size");
+    }
     spreadWorkGroupSize   = c_spreadMaxWarpsPerBlock * warpSize_;
     solveMaxWorkGroupSize = c_solveMaxWarpsPerBlock * warpSize_;
     gatherWorkGroupSize   = c_gatherMaxWarpsPerBlock * warpSize_;

@@ -87,8 +87,11 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
     // Local memory buffer for i x+q pre-loading
     using Xq              = StaticLocalStorage<Float4, c_superClusterSize * c_clSize>;
     using PrunedPairCount = StaticLocalStorage<int, 1, haveFreshList && nbnxmSortListsOnGpu()>;
-    auto sm_xqHostStorage = Xq::makeHostStorage(cgh);
+    using WorkGroupAny =
+            StaticLocalStorage<int, c_syclPruneKernelJPackedConcurrency, (GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET)>;
+    auto sm_xqHostStorage              = Xq::makeHostStorage(cgh);
     auto sm_prunedPairCountHostStorage = PrunedPairCount::makeHostStorage(cgh);
+    auto sm_workGroupAnyHostStorage    = WorkGroupAny::makeHostStorage(cgh);
 
     constexpr int warpSize = sc_gpuParallelExecutionWidth(layoutType);
 
@@ -104,15 +107,18 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
     /* Requirements:
      * Work group (block) must have range (c_clSize, c_clSize, ...) (for itemIdx calculation, easy
      * to change). */
-    return [=](sycl::nd_item<3> itemIdx) [[sycl::reqd_sub_group_size(requiredSubGroupSize)]]
+    return [=](sycl::nd_item<3> itemIdx) GMX_NBNXM_SYCL_REQD_SUB_GROUP_SIZE(requiredSubGroupSize)
     {
         // These declarations work on the device.
         typename Xq::DeviceStorage              sm_xqDeviceStorage;
         typename PrunedPairCount::DeviceStorage sm_prunedPairCountDeviceStorage;
+        typename WorkGroupAny::DeviceStorage    sm_workGroupAnyDeviceStorage;
         // Extract the valid pointer to local storage
         sycl::local_ptr<Float4> sm_xq = Xq::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
         sycl::local_ptr<int>    sm_prunedPairCount = PrunedPairCount::get_pointer(
                 sm_prunedPairCountHostStorage, sm_prunedPairCountDeviceStorage);
+        sycl::local_ptr<int> sm_workGroupAny =
+                WorkGroupAny::get_pointer(sm_workGroupAnyHostStorage, sm_workGroupAnyDeviceStorage);
         // thread/block/warp id-s
         const unsigned tidxi = itemIdx.get_local_id(2);
         const unsigned tidxj = itemIdx.get_local_id(1);
@@ -121,7 +127,11 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
         const int      bidx  = itemIdx.get_group(2);
 
         int part = gm_rollingPruningPart[bidx];
+#if GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET
+        itemIdx.barrier(fence_space::local_space);
+#else
         itemIdx.barrier(fence_space::global_and_local);
+#endif
         if (tidxi == 0 && tidxj == 0 && tidxz == 0)
         {
             gm_rollingPruningPart[bidx] = (part + 1) % numParts;
@@ -135,8 +145,29 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
             return; // Since the whole block is exiting, it is fine w.r.t. group_barrier
         }
 
-        const sycl::sub_group sg   = itemIdx.get_sub_group();
-        const int             widx = tidx / warpSize;
+        auto      sg   = nbnxmKernelExecutionGroup(itemIdx);
+        const int widx = tidx / warpSize;
+
+        auto anyInNbnxmGroup = [&](bool value)
+        {
+#if GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET
+            if (tidx == 0)
+            {
+                sm_workGroupAny[tidxz] = 0;
+            }
+            itemIdx.barrier(fence_space::local_space);
+            if (value)
+            {
+                sycl::atomic_ref<int, sycl::memory_order::relaxed, sycl::memory_scope::work_group, sycl::access::address_space::local_space>
+                        anyRef(sm_workGroupAny[tidxz]);
+                anyRef.store(1);
+            }
+            itemIdx.barrier(fence_space::local_space);
+            return sm_workGroupAny[tidxz] != 0;
+#else
+            return sycl::any_of_group(sg, value);
+#endif
+        };
 
         // my i super-cluster's index = sciOffset + current bidx * numParts + part
         const nbnxn_sci_t nbSci          = gm_plistSci[bidx * numParts + part];
@@ -233,13 +264,13 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
                                 /* If _none_ of the atoms pairs are in rlistOuter
                                  * range, the bit corresponding to the current
                                  * cluster-pair in imask gets set to 0. */
-                                if (haveFreshList && !(sycl::any_of_group(sg, r2 < rlistOuterSq)))
+                                if (haveFreshList && !(anyInNbnxmGroup(r2 < rlistOuterSq)))
                                 {
                                     imaskFull &= ~mask_ji;
                                 }
                                 /* If any atom pair is within range, set the bit
                                  * corresponding to the current cluster-pair. */
-                                if (sycl::any_of_group(sg, r2 < rlistInnerSq))
+                                if (anyInNbnxmGroup(r2 < rlistInnerSq))
                                 {
                                     imaskNew |= mask_ji;
                                 }

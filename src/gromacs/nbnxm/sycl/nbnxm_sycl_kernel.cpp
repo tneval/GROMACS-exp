@@ -52,6 +52,10 @@ namespace gmx
 
 static int getNbnxmSubGroupSize(const DeviceInformation& deviceInfo, PairlistType layoutType)
 {
+#if GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET
+    GMX_UNUSED_VALUE(deviceInfo);
+    return sc_gpuParallelExecutionWidth(layoutType);
+#else
     if (deviceInfo.supportedSubGroupSizes.size() == 1)
     {
         return deviceInfo.supportedSubGroupSizes[0];
@@ -75,6 +79,7 @@ static int getNbnxmSubGroupSize(const DeviceInformation& deviceInfo, PairlistTyp
         GMX_RELEASE_ASSERT(false, "Device has no known supported sub-group sizes");
         return 0;
     }
+#endif
 }
 
 template<int subGroupSize, bool doPruneNBL, bool doCalcEnergies>

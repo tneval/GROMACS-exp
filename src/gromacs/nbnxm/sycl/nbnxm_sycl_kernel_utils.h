@@ -48,11 +48,53 @@
 namespace gmx
 {
 
+#if GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET
+#    define GMX_NBNXM_SYCL_REQD_SUB_GROUP_SIZE(size)
+#else
+#    define GMX_NBNXM_SYCL_REQD_SUB_GROUP_SIZE(size) [[sycl::reqd_sub_group_size(size)]]
+#endif
+
 /*! \brief Prune kernel's jPacked processing concurrency.
  *
  *  The \c GMX_NBNXN_PRUNE_KERNEL_JPACKED_CONCURRENCY macro allows compile-time override.
  */
-static constexpr int c_syclPruneKernelJPackedConcurrency = c_pruneKernelJPackedConcurrency;
+static constexpr int c_syclPruneKernelJPackedConcurrency =
+#if GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET
+        1;
+#else
+        c_pruneKernelJPackedConcurrency;
+#endif
+
+/*! \brief Return the group to use for NBNXM collectives.
+ *
+ * AdaptiveCpp generic targets currently do not support sub-groups on the OpenMP
+ * backend, so use the full work-group there. The launch geometry is adjusted so
+ * that the work-group is the intended 8x8 execution unit.
+ */
+static inline auto nbnxmKernelExecutionGroup(const sycl::nd_item<3>& itemIdx)
+{
+#if GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET
+    return itemIdx.get_group();
+#else
+    return itemIdx.get_sub_group();
+#endif
+}
+
+/*! \brief Size of the group used for NBNXM collectives. */
+static inline int nbnxmKernelExecutionGroupSize(const sycl::nd_item<3>& itemIdx)
+{
+#if GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET
+    return itemIdx.get_local_range().size();
+#else
+    return itemIdx.get_sub_group().get_max_local_range()[0];
+#endif
+}
+
+/*! \brief Barrier for the group used for NBNXM collectives. */
+static inline void nbnxmKernelExecutionGroupBarrier(const sycl::nd_item<3>& itemIdx)
+{
+    sycl::group_barrier(nbnxmKernelExecutionGroup(itemIdx));
+}
 
 // i-cluster interaction mask for a super-cluster with all c_nbnxnGpuNumClusterPerSupercluster=8 bits set.
 static constexpr unsigned sc_superClInteractionMask(const PairlistType layoutType)

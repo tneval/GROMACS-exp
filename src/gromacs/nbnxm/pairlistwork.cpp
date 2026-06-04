@@ -64,8 +64,11 @@ NbnxmPairlistGpuWork::ISuperClusterData::ISuperClusterData(const PairlistType la
 }
 NbnxmPairlistGpuWork::NbnxmPairlistGpuWork(const PairlistType layoutType) :
     iSuperClusterData(layoutType),
-    distanceBuffer(sc_gpuNumClusterPerCell(layoutType)),
+    distanceBuffer(sc_gpuNumClusterPerCell(layoutType))
+#if !(GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET)
+    ,
     sci_sort({}, { gmx::PinningPolicy::PinnedIfSupported })
+#endif
 {
 }
 

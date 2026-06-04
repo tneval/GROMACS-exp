@@ -146,7 +146,7 @@ static inline void reduceForceJShuffle(Float3                   f,
 {
     constexpr int c_clSize = sc_gpuClusterSize(sc_layoutType);
     static_assert(c_clSize == 8 || c_clSize == 4);
-    sycl::sub_group sg = itemIdx.get_sub_group();
+    auto sg = nbnxmKernelExecutionGroup(itemIdx);
 
     f[0] += sycl::shift_group_left(sg, f[0], 1);
     f[1] += sycl::shift_group_right(sg, f[1], 1);
@@ -198,8 +198,21 @@ static inline float groupReduce(const sycl::nd_item<3> itemIdx,
 {
     constexpr int numSubGroupsInGroup = groupSize / subGroupSize;
     static_assert(numSubGroupsInGroup == 1 || numSubGroupsInGroup == 2);
-    sycl::sub_group sg = itemIdx.get_sub_group();
-    valueToReduce      = sycl::reduce_over_group(sg, valueToReduce, sycl::plus<float>());
+#if GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET
+    itemIdx.barrier(fence_space::local_space);
+    sm_buf[tidxi] = valueToReduce;
+    itemIdx.barrier(fence_space::local_space);
+    if (tidxi == 0)
+    {
+        valueToReduce = 0;
+        for (int i = 0; i < groupSize; i++)
+        {
+            valueToReduce += sm_buf[i];
+        }
+    }
+#else
+    auto sg       = nbnxmKernelExecutionGroup(itemIdx);
+    valueToReduce = sycl::reduce_over_group(sg, valueToReduce, sycl::plus<float>());
     // If we have two sub-groups, we should reduce across them.
     if constexpr (numSubGroupsInGroup == 2)
     {
@@ -213,6 +226,7 @@ static inline float groupReduce(const sycl::nd_item<3> itemIdx,
             valueToReduce += sm_buf[0];
         }
     }
+#endif
     return valueToReduce;
 }
 
@@ -231,6 +245,15 @@ static inline void reduceForceJGeneric(sycl::local_ptr<float>   sm_buf,
                                        const int                aidx,
                                        sycl::global_ptr<Float3> a_f)
 {
+#if GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET
+    GMX_UNUSED_VALUE(sm_buf);
+    GMX_UNUSED_VALUE(itemIdx);
+    GMX_UNUSED_VALUE(tidxi);
+    GMX_UNUSED_VALUE(tidxj);
+    atomicFetchAdd(a_f[aidx][XX], f[XX]);
+    atomicFetchAdd(a_f[aidx][YY], f[YY]);
+    atomicFetchAdd(a_f[aidx][ZZ], f[ZZ]);
+#else
     constexpr int        c_clSize         = sc_gpuClusterSize(sc_layoutType);
     static constexpr int sc_fBufferStride = c_clSize * c_clSize;
     int                  tidx             = tidxi + tidxj * c_clSize;
@@ -238,10 +261,10 @@ static inline void reduceForceJGeneric(sycl::local_ptr<float>   sm_buf,
     sm_buf[1 * sc_fBufferStride + tidx]   = f[1];
     sm_buf[2 * sc_fBufferStride + tidx]   = f[2];
 
-    sycl::group_barrier(itemIdx.get_sub_group());
+    nbnxmKernelExecutionGroupBarrier(itemIdx);
 
     // reducing data 8-by-by elements on the leader of same threads as those storing above
-    SYCL_ASSERT(itemIdx.get_sub_group().get_max_local_range()[0] >= c_clSize);
+    SYCL_ASSERT(nbnxmKernelExecutionGroupSize(itemIdx) >= c_clSize);
 
     if (tidxi < 3)
     {
@@ -253,6 +276,7 @@ static inline void reduceForceJGeneric(sycl::local_ptr<float>   sm_buf,
 
         atomicFetchAdd(a_f[aidx][tidxi], fSum);
     }
+#endif
 }
 
 
@@ -354,7 +378,8 @@ static inline void reduceForceIAndFShiftGeneric(sycl::local_ptr<float>   sm_buf,
            storing the reduction result above. */
         if (tidxj < 3)
         {
-            if constexpr (c_avoidFloatingPointAtomics(sc_layoutType))
+            if constexpr (c_avoidFloatingPointAtomics(sc_layoutType)
+                          && !(GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET))
             {
                 /* Intel Xe (Gen12LP) and earlier GPUs implement floating-point atomics via
                  * a compare-and-swap (CAS) loop. It has particularly poor performance when
@@ -362,7 +387,7 @@ static inline void reduceForceIAndFShiftGeneric(sycl::local_ptr<float>   sm_buf,
                  * Such optimization might be slightly beneficial for NVIDIA and AMD as well,
                  * but it is unlikely to make a big difference and thus was not evaluated.
                  */
-                auto sg = itemIdx.get_sub_group();
+                auto sg = nbnxmKernelExecutionGroup(itemIdx);
                 fShiftBuf += sycl::shift_group_left(sg, fShiftBuf, 1);
                 fShiftBuf += sycl::shift_group_left(sg, fShiftBuf, 2);
                 if (tidxi == 0)
@@ -406,12 +431,12 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
         sycl::global_ptr<Float3> a_f,
         sycl::global_ptr<Float3> a_fShift)
 {
-    constexpr int         c_superClusterSize = sc_gpuClusterPerSuperCluster(sc_layoutType);
-    constexpr int         c_clSize           = sc_gpuClusterSize(sc_layoutType);
-    const sycl::sub_group sg                 = itemIdx.get_sub_group();
+    constexpr int c_superClusterSize = sc_gpuClusterPerSuperCluster(sc_layoutType);
+    constexpr int c_clSize           = sc_gpuClusterSize(sc_layoutType);
+    auto          sg                 = nbnxmKernelExecutionGroup(itemIdx);
     static_assert(numShuffleReductionSteps == 2 || numShuffleReductionSteps == 3);
-    SYCL_ASSERT(sg.get_max_local_range()[0] >= 4 * c_clSize
-                && "Subgroup too small for two-step shuffle reduction, use 1-step");
+    SYCL_ASSERT(nbnxmKernelExecutionGroupSize(itemIdx) >= 4 * c_clSize
+                && "Group too small for two-step shuffle reduction, use 1-step");
 
     float fShiftBuf = 0.0F;
 
@@ -556,12 +581,12 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
         sycl::global_ptr<Float3> a_f,
         sycl::global_ptr<Float3> a_fShift)
 {
-    constexpr int         c_superClusterSize = sc_gpuClusterPerSuperCluster(sc_layoutType);
-    constexpr int         c_clSize           = sc_gpuClusterSize(sc_layoutType);
-    const sycl::sub_group sg                 = itemIdx.get_sub_group();
-    SYCL_ASSERT(sg.get_max_local_range()[0] >= 2 * c_clSize
-                && "Subgroup too small even for 1-step shuffle reduction");
-    SYCL_ASSERT(sg.get_max_local_range()[0] < 4 * c_clSize
+    constexpr int c_superClusterSize = sc_gpuClusterPerSuperCluster(sc_layoutType);
+    constexpr int c_clSize           = sc_gpuClusterSize(sc_layoutType);
+    auto          sg                 = nbnxmKernelExecutionGroup(itemIdx);
+    SYCL_ASSERT(nbnxmKernelExecutionGroupSize(itemIdx) >= 2 * c_clSize
+                && "Group too small even for 1-step shuffle reduction");
+    SYCL_ASSERT(nbnxmKernelExecutionGroupSize(itemIdx) < 4 * c_clSize
                 && "One-step shuffle reduction inefficient, use two-step version");
     float fShiftBufXY = 0.0F;
     float fShiftBufZ  = 0.0F;
@@ -596,7 +621,7 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
                 fShiftBufZ += fz;
             }
         }
-        sycl::group_barrier(itemIdx.get_sub_group());
+        nbnxmKernelExecutionGroupBarrier(itemIdx);
     }
     /* add up local shift forces into global mem */
     if (calcFShift)
@@ -712,9 +737,11 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
      * Currently (mid-2022), it disables shuffle reduction on all low-end Intel devices, because
      * it causes up to 20x slowdown compared to generic, local memory-based reduction. */
     constexpr bool useShuffleReductionForceI =
-            (numReductionSteps <= 3) && (c_clSize == 8 || c_clSize == 4)
+            !(GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET) && (numReductionSteps <= 3)
+            && (c_clSize == 8 || c_clSize == 4)
             && !(numReductionSteps == 1 && c_avoidFloatingPointAtomics);
-    constexpr bool useShuffleReductionForceJ = gmx::isPowerOfTwo(c_superClusterSize);
+    constexpr bool useShuffleReductionForceJ = !(GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET)
+                                               && gmx::isPowerOfTwo(c_superClusterSize);
 
     // Local memory buffer for i x+q pre-loading
     using Xq        = StaticLocalStorage<Float4, c_superClusterSize * c_clSize>;
@@ -750,7 +777,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
             (props.elecEwald || props.elecRF || props.vdwEwald || (props.elecCutoff && doCalcEnergies));
 
 
-    return [=](sycl::nd_item<3> itemIdx) [[sycl::reqd_sub_group_size(subGroupSize)]]
+    return [=](sycl::nd_item<3> itemIdx) GMX_NBNXM_SYCL_REQD_SUB_GROUP_SIZE(subGroupSize)
     {
         if constexpr (skipKernelCompilation<subGroupSize>())
         {
@@ -781,7 +808,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
         const unsigned bidx = itemIdx.get_group(2);
 
-        const sycl::sub_group sg = itemIdx.get_sub_group();
+        auto sg = nbnxmKernelExecutionGroup(itemIdx);
         // Could use sg.get_group_range to compute the imask & exclusion Idx, but too much of the logic relies on it anyway
         // and in cases where prunedClusterPairSize != subGroupSize we can't use it anyway
         const unsigned imeiIdx = tidx / prunedClusterPairSize;
@@ -1000,6 +1027,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
                         if constexpr (doPruneNBL)
                         {
+#if !(GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET)
                             /* If _none_ of the atoms pairs are in cutoff range,
                              * the bit corresponding to the current
                              * cluster-pair in imask gets set to 0. */
@@ -1007,6 +1035,9 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             {
                                 imask &= ~maskJI;
                             }
+#else
+                            GMX_UNUSED_VALUE(rlistOuterSq);
+#endif
                         }
                         const float pairExclMask = (wexcl & maskJI) ? 1.0F : 0.0F;
 

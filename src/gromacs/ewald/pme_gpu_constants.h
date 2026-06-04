@@ -132,6 +132,16 @@ enum class ThreadsPerAtom : int
  * smaller block/workgroup sizes, depending on device capabilities.
  */
 
+#if GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET
+// ACpp generic/OpenMP does not support sub-groups, so map one logical PME warp to one work-group.
+constexpr int c_spreadMaxWarpsPerBlock = 1;
+constexpr int c_solveMaxWarpsPerBlock  = 1;
+constexpr int c_gatherMaxWarpsPerBlock = 1;
+#    define GMX_PME_SYCL_REQD_SUB_GROUP_SIZE(size)
+#    define GMX_PME_SYCL_KERNEL_GROUP(itemIdx) (itemIdx.get_group())
+#    define GMX_PME_SYCL_GROUP_BARRIER(itemIdx) \
+        itemIdx.barrier(sycl::access::fence_space::local_space)
+#else
 //! Spreading max block width in warps picked among powers of 2 (2, 4, 8, 16) for max. occupancy and min. runtime in most cases
 constexpr int c_spreadMaxWarpsPerBlock = 8;
 
@@ -141,6 +151,10 @@ constexpr int c_solveMaxWarpsPerBlock = 8;
 
 //! Gathering max block width in warps - picked empirically among 2, 4, 8, 16 for max. occupancy and min. runtime
 constexpr int c_gatherMaxWarpsPerBlock = 4;
+#    define GMX_PME_SYCL_REQD_SUB_GROUP_SIZE(size) [[sycl::reqd_sub_group_size(size)]]
+#    define GMX_PME_SYCL_KERNEL_GROUP(itemIdx) (itemIdx.get_sub_group())
+#    define GMX_PME_SYCL_GROUP_BARRIER(itemIdx) sycl::group_barrier(itemIdx.get_sub_group())
+#endif
 
 #if GMX_GPU_CUDA
 /* All the fields below are dependent on warp_size and should

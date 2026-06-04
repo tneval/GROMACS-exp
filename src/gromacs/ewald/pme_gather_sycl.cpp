@@ -113,36 +113,53 @@ inline void reduceAtomForces(sycl::nd_item<3>        itemIdx,
     // TODO: find out if this is the best in terms of transactions count
     static_assert(order == 4, "Only order of 4 is implemented");
 
-    sycl::sub_group sg = itemIdx.get_sub_group();
-
     static_assert(atomDataSize <= subGroupSize,
                   "TODO: rework for atomDataSize > subGroupSize (order 8 or larger)");
     static_assert(gmx::isPowerOfTwo(atomDataSize));
+    static constexpr int atomsPerBlock = workGroupSize / atomDataSize;
 
-    fx += sycl::shift_group_left(sg, fx, 1);
-    fy += sycl::shift_group_right(sg, fy, 1);
-    fz += sycl::shift_group_left(sg, fz, 1);
-    if (splineIndex & 1)
+    if constexpr (GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET)
     {
-        fx = fy;
+        if (itemIdx.get_local_linear_id() < atomsPerBlock)
+        {
+            sm_forces[itemIdx.get_local_linear_id()] = { 0.0F, 0.0F, 0.0F };
+        }
+        itemIdx.barrier(sycl::access::fence_space::local_space);
+
+        atomicFetchAddLocal(sm_forces[atomIndexLocal][XX], fx * readGridSize(realGridSizeFP, XX));
+        atomicFetchAddLocal(sm_forces[atomIndexLocal][YY], fy * readGridSize(realGridSizeFP, YY));
+        atomicFetchAddLocal(sm_forces[atomIndexLocal][ZZ], fz * readGridSize(realGridSizeFP, ZZ));
+        itemIdx.barrier(sycl::access::fence_space::local_space);
     }
-    fx += sycl::shift_group_left(sg, fx, 2);
-    fz += sycl::shift_group_right(sg, fz, 2);
-    if (splineIndex & 2)
+    else
     {
-        fx = fz;
-    }
-    static_assert(atomDataSize >= 4);
-    // We have to just further reduce those groups of 4
-    for (int delta = 4; delta < atomDataSize; delta *= 2)
-    {
-        fx += sycl::shift_group_left(sg, fx, delta);
-    }
-    const int dimIndex = splineIndex;
-    if (dimIndex < DIM)
-    {
-        const float n                       = readGridSize(realGridSizeFP, dimIndex);
-        sm_forces[atomIndexLocal][dimIndex] = fx * n;
+        auto sg = GMX_PME_SYCL_KERNEL_GROUP(itemIdx);
+
+        fx += sycl::shift_group_left(sg, fx, 1);
+        fy += sycl::shift_group_right(sg, fy, 1);
+        fz += sycl::shift_group_left(sg, fz, 1);
+        if (splineIndex & 1)
+        {
+            fx = fy;
+        }
+        fx += sycl::shift_group_left(sg, fx, 2);
+        fz += sycl::shift_group_right(sg, fz, 2);
+        if (splineIndex & 2)
+        {
+            fx = fz;
+        }
+        static_assert(atomDataSize >= 4);
+        // We have to just further reduce those groups of 4
+        for (int delta = 4; delta < atomDataSize; delta *= 2)
+        {
+            fx += sycl::shift_group_left(sg, fx, delta);
+        }
+        const int dimIndex = splineIndex;
+        if (dimIndex < DIM)
+        {
+            const float n                       = readGridSize(realGridSizeFP, dimIndex);
+            sm_forces[atomIndexLocal][dimIndex] = fx * n;
+        }
     }
 }
 
@@ -333,7 +350,7 @@ auto pmeGatherKernel(CommandGroupHandler cgh,
     auto sm_forcesHostStorage          = Forces::makeHostStorage(cgh);
     auto sm_fractCoordsHostStorage     = FractCoords::makeHostStorage(cgh);
 
-    return [=](sycl::nd_item<3> itemIdx) [[sycl::reqd_sub_group_size(subGroupSize)]]
+    return [=](sycl::nd_item<3> itemIdx) GMX_PME_SYCL_REQD_SUB_GROUP_SIZE(subGroupSize)
     {
         if constexpr (skipKernelCompilation<subGroupSize>())
         {
@@ -460,7 +477,7 @@ auto pmeGatherKernel(CommandGroupHandler cgh,
                     sm_gridlineIndices,
                     sm_fractCoords,
                     itemIdx);
-            sycl::group_barrier(itemIdx.get_sub_group());
+            GMX_PME_SYCL_GROUP_BARRIER(itemIdx);
         }
         float fx = 0.0F;
         float fy = 0.0F;

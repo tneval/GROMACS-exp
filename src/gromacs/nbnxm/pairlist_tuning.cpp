@@ -634,7 +634,8 @@ void setupDynamicPairlistPruning(const MDLogger&            mdlog,
     const bool useGpuList = sc_isGpuSpecificPairlist(listParams->pairlistType);
 
     if (supportsDynamicPairlistGenerationInterval(inputrec)
-        && std::getenv("GMX_DISABLE_DYNAMICPRUNING") == nullptr)
+        && std::getenv("GMX_DISABLE_DYNAMICPRUNING") == nullptr
+        && !(GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET))
     {
         /* Note that nstlistPrune can have any value independently of nstlist.
          * Actually applying rolling pruning is only useful when

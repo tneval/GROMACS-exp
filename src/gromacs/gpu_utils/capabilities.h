@@ -73,7 +73,8 @@ struct GpuConfigurationCapabilities
     //! Whether this configuration supports PME max gridsize setting
     static constexpr bool PmeDynamicMaxGridSize = GMX_GPU_CUDA || GMX_GPU_HIP;
     //! Whether this configuration supports PME solve kernels with less than 4 warps
-    static constexpr bool PmeSolveNeedsAtLeastFourWarps = GMX_GPU && !GMX_GPU_OPENCL;
+    static constexpr bool PmeSolveNeedsAtLeastFourWarps =
+            GMX_GPU && !GMX_GPU_OPENCL && !(GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET);
     //! Whether this configuration supports running FFT kernels on the device
     static constexpr bool Fft = GMX_GPU
                                 && (GMX_GPU_FFT_MKL || GMX_GPU_FFT_ROCFFT || GMX_GPU_FFT_HIPFFT
@@ -82,7 +83,8 @@ struct GpuConfigurationCapabilities
     //! Whether this configuration supports running bonded kernels on the device
     static constexpr bool Bonded = GMX_GPU && !GMX_GPU_OPENCL;
     //! Whether this configuration supports running update+LINCS+SETTLE kernels on the device
-    static constexpr bool Update = GMX_GPU && !GMX_GPU_OPENCL;
+    static constexpr bool Update =
+            GMX_GPU && !GMX_GPU_OPENCL && !(GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET);
     //! Whether this configuration supports running the direct GPU communication path with thread-MPI
     static constexpr bool ThreadMpiDirectComm = GMX_GPU_CUDA || GMX_GPU_HIP;
     //! Whether this configuration supports running the direct GPU communication path with library-MPI

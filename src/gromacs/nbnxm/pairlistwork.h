@@ -127,7 +127,11 @@ struct NbnxmPairlistGpuWork
     std::vector<int> sortBuffer;
 
     //! Second sci array, for sorting
+#if GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET
+    std::vector<nbnxn_sci_t> sci_sort;
+#else
     HostVector<nbnxn_sci_t> sci_sort;
+#endif
 
     //! Protect data from cache pollution between threads
     gmx_cache_protect_t cp1;

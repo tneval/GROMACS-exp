@@ -143,8 +143,10 @@ enum class DeviceVendor : int
     Apple = 4,
     //! PoclCpu, any CPU vendor with PoCL CPU driver
     PoclCpu = 5,
+    //! Any CPU vendor with AdaptiveCpp OpenMP CPU driver
+    AcppCpu = 6,
     //! Enumeration size
-    Count = 6
+    Count = 7
 };
 
 

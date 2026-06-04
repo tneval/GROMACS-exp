@@ -67,6 +67,7 @@
 
 
 static constexpr const char* sc_poclPlatformString = "Portable Computing Language";
+static constexpr const char* sc_acppPlatformString = "AdaptiveCpp OpenMP host device";
 
 static std::optional<std::tuple<int, int>> parseHardwareVersionNvidia(const std::string& archName)
 {
@@ -284,22 +285,24 @@ static DeviceStatus isDeviceCompatible(const sycl::device&           syclDevice,
             return DeviceStatus::Incompatible;
         }
 
+#if !(GMX_SYCL_ACPP && GMX_ACPP_HAVE_GENERIC_TARGET)
 // Ensure any changes are in sync with nbnxm_sycl_kernel.h
-#if GMX_GPU_NB_CLUSTER_SIZE == 4
-#    if GMX_GPU_NB_DISABLE_CLUSTER_PAIR_SPLIT
+#    if GMX_GPU_NB_CLUSTER_SIZE == 4
+#        if GMX_GPU_NB_DISABLE_CLUSTER_PAIR_SPLIT
         const std::vector<int> compiledNbnxmSubGroupSizes{ 16 };
-#    else
+#        else
         const std::vector<int> compiledNbnxmSubGroupSizes{ 8 };
-#    endif
-#elif GMX_GPU_NB_CLUSTER_SIZE == 8
-#    if GMX_SYCL_ACPP && !(GMX_ACPP_HAVE_HIP_TARGET) && !GMX_ACPP_HAVE_GENERIC_TARGET
+#        endif
+#    elif GMX_GPU_NB_CLUSTER_SIZE == 8
+#        if GMX_SYCL_ACPP && !(GMX_ACPP_HAVE_HIP_TARGET) && !GMX_ACPP_HAVE_GENERIC_TARGET
         const std::vector<int> compiledNbnxmSubGroupSizes{ 32 }; // Only NVIDIA
-#    elif GMX_SYCL_ACPP && (GMX_ACPP_HAVE_HIP_TARGET && !GMX_ENABLE_AMD_RDNA_SUPPORT) && !GMX_ACPP_HAVE_GENERIC_TARGET
+#        elif GMX_SYCL_ACPP && (GMX_ACPP_HAVE_HIP_TARGET && !GMX_ENABLE_AMD_RDNA_SUPPORT) \
+                && !GMX_ACPP_HAVE_GENERIC_TARGET
         const std::vector<int> compiledNbnxmSubGroupSizes{ 64 }; // Only AMD GCN and CDNA
-#    else
+#        else
         const std::vector<int> compiledNbnxmSubGroupSizes{ 32, 64 };
+#        endif
 #    endif
-#endif
 
         const auto subGroupSizeSupportedByDevice = [&supportedSubGroupSizes](const int sgSize) -> bool
         {
@@ -310,15 +313,18 @@ static DeviceStatus isDeviceCompatible(const sycl::device&           syclDevice,
                          compiledNbnxmSubGroupSizes.end(),
                          subGroupSizeSupportedByDevice))
         {
-#if GMX_SYCL_ACPP && GMX_ACPP_HAVE_HIP_TARGET && !GMX_ENABLE_AMD_RDNA_SUPPORT
+#    if GMX_SYCL_ACPP && GMX_ACPP_HAVE_HIP_TARGET && !GMX_ENABLE_AMD_RDNA_SUPPORT
             if (supportedSubGroupSizes.size() == 1 && supportedSubGroupSizes[0] == 32
                 && deviceVendor == DeviceVendor::Amd)
             {
                 return DeviceStatus::IncompatibleAmdRdnaNotTargeted;
             }
-#endif
+#    endif
             return DeviceStatus::IncompatibleClusterSize;
         }
+#else
+        GMX_UNUSED_VALUE(supportedSubGroupSizes);
+#endif
 
         if (deviceVendor == DeviceVendor::PoclCpu)
         {
@@ -593,10 +599,14 @@ std::vector<std::unique_ptr<DeviceInformation>> findDevices()
         // In case we have PoCL as SYCL backend and the device is CPU, set the 'special' PoCL vendor.
         // This way we can use any CPU under the PoCL vendor.
         // If we have PoCL and GPU (for example PoCL->L0->Intel GPU), we will use the actual device vendor.
-        if (syclDevice.is_cpu()
-            && syclDevice.get_platform().get_info<sycl::info::platform::name>() == sc_poclPlatformString)
+        const auto platformName = syclDevice.get_platform().get_info<sycl::info::platform::name>();
+        if (syclDevice.is_cpu() && platformName == sc_poclPlatformString)
         {
             deviceInfos[i]->deviceVendor = DeviceVendor::PoclCpu;
+        }
+        else if (syclDevice.is_cpu() && platformName == sc_acppPlatformString)
+        {
+            deviceInfos[i]->deviceVendor = DeviceVendor::AcppCpu;
         }
         else
         {

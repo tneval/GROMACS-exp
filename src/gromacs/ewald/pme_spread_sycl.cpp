@@ -220,7 +220,7 @@ auto pmeSplineAndSpreadKernel(CommandGroupHandler cgh,
     auto sm_coefficientsHostStorage    = Coefficients::makeHostStorage(cgh);
     auto sm_fractCoordsHostStorage     = FractCoords::makeHostStorage(cgh);
 
-    return [=](sycl::nd_item<3> itemIdx) [[sycl::reqd_sub_group_size(subGroupSize)]]
+    return [=](sycl::nd_item<3> itemIdx) GMX_PME_SYCL_REQD_SUB_GROUP_SIZE(subGroupSize)
     {
         if constexpr (skipKernelCompilation<subGroupSize>())
         {
@@ -291,7 +291,7 @@ auto pmeSplineAndSpreadKernel(CommandGroupHandler cgh,
                     sm_gridlineIndices,
                     FractCoords::get_pointer(sm_fractCoordsHostStorage, sm_fractCoordsDeviceStorage),
                     itemIdx);
-            sycl::group_barrier(itemIdx.get_sub_group());
+            GMX_PME_SYCL_GROUP_BARRIER(itemIdx);
         }
         else
         {

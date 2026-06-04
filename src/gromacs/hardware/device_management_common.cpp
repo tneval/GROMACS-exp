@@ -109,6 +109,10 @@ DeviceVendor getDeviceVendor(const char* vendorName)
         {
             return DeviceVendor::PoclCpu;
         }
+        else if (std::strstr(vendorName, "the AdaptiveCpp project"))
+        {
+            return DeviceVendor::AcppCpu;
+        }
     }
     return DeviceVendor::Unknown;
 }
@@ -125,6 +129,7 @@ int getDeviceComputeUnitFactor(const DeviceInformation& deviceInfo)
             return 16;
         case DeviceVendor::Nvidia:
         case DeviceVendor::Apple:
+        case DeviceVendor::AcppCpu:
         case DeviceVendor::PoclCpu: return 1;
         default:
             // Unknown vendor, we don't know any better.

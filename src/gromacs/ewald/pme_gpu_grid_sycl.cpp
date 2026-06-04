@@ -53,6 +53,7 @@
 #include "gromacs/timing/wallcycle.h"
 #include "gromacs/utility/vec.h"
 
+#include "pme_gpu_constants.h"
 #include "pme_gpu_grid.h"
 #include "pme_gpu_types.h"
 #include "pme_gpu_types_host.h"
@@ -106,7 +107,7 @@ public:
                        const size_t overlapSizeLeft,
                        const size_t overlapSizeRight)
     {
-        return [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(subGroupSize)]]
+        return [=](sycl::nd_item<3> item_ct1) GMX_PME_SYCL_REQD_SUB_GROUP_SIZE(subGroupSize)
         {
             size_t iz = item_ct1.get_local_id(2) + item_ct1.get_group(2) * item_ct1.get_local_range(2);
             size_t iy = item_ct1.get_local_id(1) + item_ct1.get_group(1) * item_ct1.get_local_range(1);
@@ -239,7 +240,7 @@ public:
                        size_t overlapSizeLeft,
                        size_t overlapSizeRight)
     {
-        return [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(subGroupSize)]]
+        return [=](sycl::nd_item<3> item_ct1) GMX_PME_SYCL_REQD_SUB_GROUP_SIZE(subGroupSize)
         {
             size_t iz = item_ct1.get_local_id(2) + item_ct1.get_group(2) * item_ct1.get_local_range(2);
             size_t iy = item_ct1.get_local_id(1) + item_ct1.get_group(1) * item_ct1.get_local_range(1);
@@ -372,7 +373,7 @@ public:
                        size_t overlapUp,
                        size_t overlapLeft)
     {
-        return [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(subGroupSize)]]
+        return [=](sycl::nd_item<3> item_ct1) GMX_PME_SYCL_REQD_SUB_GROUP_SIZE(subGroupSize)
         {
             size_t iz = item_ct1.get_local_id(2) + item_ct1.get_group(2) * item_ct1.get_local_range(2);
             size_t iy = item_ct1.get_local_id(1) + item_ct1.get_group(1) * item_ct1.get_local_range(1);
@@ -496,7 +497,7 @@ public:
                        size_t overlapUp,
                        size_t overlapLeft)
     {
-        return [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(subGroupSize)]]
+        return [=](sycl::nd_item<3> item_ct1) GMX_PME_SYCL_REQD_SUB_GROUP_SIZE(subGroupSize)
         {
             size_t iz = item_ct1.get_local_id(2) + item_ct1.get_group(2) * item_ct1.get_local_range(2);
             size_t iy = item_ct1.get_local_id(1) + item_ct1.get_group(1) * item_ct1.get_local_range(1);
@@ -1230,7 +1231,7 @@ public:
                               sycl::uint3 fftSize,
                               sycl::uint3 pmeSize)
     {
-        return [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(subGroupSize)]]
+        return [=](sycl::nd_item<3> item_ct1) GMX_PME_SYCL_REQD_SUB_GROUP_SIZE(subGroupSize)
         {
             size_t iz = item_ct1.get_local_id(2) + item_ct1.get_group(2) * item_ct1.get_local_range(2);
             size_t iy = item_ct1.get_local_id(1) + item_ct1.get_group(1) * item_ct1.get_local_range(1);
