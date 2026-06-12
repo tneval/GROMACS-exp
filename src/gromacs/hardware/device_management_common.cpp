@@ -87,6 +87,7 @@ bool isDeviceDetectionEnabled()
 
 DeviceVendor getDeviceVendor(const char* vendorName)
 {
+    printf("-- Vendorname: %s\n", vendorName);
     if (vendorName)
     {
         if (std::strstr(vendorName, "NVIDIA"))

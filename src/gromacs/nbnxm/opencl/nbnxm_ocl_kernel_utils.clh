@@ -78,6 +78,8 @@
 #    define SUBGROUP_SIZE 8
 #elif defined _AMD_SOURCE_
 #    define SUBGROUP_SIZE 64
+#elif defined _POCL_SOURCE_
+#    define SUBGROUP_SIZE 8
 #else
 #    define SUBGROUP_SIZE 32
 #endif

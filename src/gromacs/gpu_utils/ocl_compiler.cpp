@@ -311,6 +311,10 @@ size_t getDeviceWarpSize(cl_context context, cl_device_id deviceId)
                                 + ocl_get_error_string(cl_error)));
     }
 
+    //warpSize = 32;
+
+    printf("warpsize: %d\n", warpSize);
+
     return warpSize;
 }
 
@@ -328,6 +332,7 @@ static std::string makeVendorFlavorChoice(DeviceVendor deviceVendor)
         case DeviceVendor::Nvidia: return "-D_NVIDIA_SOURCE_";
         case DeviceVendor::Intel: return "-D_INTEL_SOURCE_";
         case DeviceVendor::Apple: return "-D_APPLE_SOURCE_";
+        case DeviceVendor::PoclCpu: return "-D_POCL_SOURCE_";
         default: return "";
     }
 }

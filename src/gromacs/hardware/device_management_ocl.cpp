@@ -222,6 +222,8 @@ static FixedCapacityVector<int, 12> fillSupportedSubGroupSizes(const cl_device_i
         }
         case DeviceVendor::Nvidia: result.push_back(32); return result;
         // Keep the list of sub-groups empty for unknown vendors
+
+        //case DeviceVendor::PoclCpu: result.push_back(32); return result;
         default: return result;
     }
 }
@@ -297,6 +299,9 @@ static DeviceStatus isDeviceFunctional(const DeviceInformation& deviceInfo)
             return GMX_GPU_NB_CLUSTER_SIZE == 4 ? DeviceStatus::Compatible
                                                 : DeviceStatus::IncompatibleClusterSize;
         case DeviceVendor::Apple: return DeviceStatus::Compatible;
+
+        case DeviceVendor::PoclCpu: return DeviceStatus::Compatible;
+
         default: return DeviceStatus::Incompatible;
     }
 }
@@ -579,6 +584,7 @@ std::vector<std::unique_ptr<DeviceInformation>> findDevices()
                                     sizeof(deviceInfoList[device_index]->vendorName),
                                     deviceInfoList[device_index]->vendorName,
                                     nullptr);
+                    printf("device vendor: %s\n",deviceInfoList[device_index]->vendorName);
 
                     deviceInfoList[device_index]->compute_units = 0;
                     clGetDeviceInfo(ocl_device_ids[j],
@@ -594,8 +600,21 @@ std::vector<std::unique_ptr<DeviceInformation>> findDevices()
                                     &(deviceInfoList[device_index]->adress_bits),
                                     nullptr);
 
-                    deviceInfoList[device_index]->deviceVendor =
+                    // Check PoCL CPU:
+                    char platform_name[256];
+
+                    clGetPlatformInfo(ocl_platform_ids[i],CL_PLATFORM_NAME,sizeof(platform_name),platform_name,NULL);
+
+                    printf("platform name: %s\n",platform_name);
+
+                    if(req_dev_type == CL_DEVICE_TYPE_CPU && strcmp(platform_name, "Portable Computing Language") == 0){
+                        printf("chose pocl\n");
+                        deviceInfoList[device_index]->deviceVendor = DeviceVendor::PoclCpu;
+                    }else{
+                        deviceInfoList[device_index]->deviceVendor =
                             getDeviceVendor(deviceInfoList[device_index]->vendorName);
+                    }
+
 
                     deviceInfoList[device_index]->supportedSubGroupSizes = gmx::fillSupportedSubGroupSizes(
                             ocl_device_ids[j], deviceInfoList[device_index]->deviceVendor);
