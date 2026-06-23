@@ -87,12 +87,12 @@
 
 
 #define MAIN_LOOP
-//#define REDUCE_I
+#define REDUCE_I
 #define REDUCE_FORCE_J
-//#define GROUP_REDUCE
-//#define INNER_FOR
-//#define INNERMOST_IF
-//#define CONDITIONAL_MASK
+#define GROUP_REDUCE
+#define INNER_FOR
+#define INNERMOST_IF
+#define CONDITIONAL_MASK
 
 #define DO_CALC_ENERGIES
 #define ELEC_CUTOFF
@@ -101,7 +101,7 @@
 
 //#define FLATTENED_GRID
 
-#define FLATTEN
+//#define FLATTEN
 
 //#define DPCPP
 
@@ -578,7 +578,8 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
     // Two bits for two steps, three bits for three steps.
     constexpr int threadBitMask = (1U << numShuffleReductionSteps) - 1;
 
-#    pragma unroll c_superClusterSize
+//#    pragma unroll c_superClusterSize
+    #pragma clang loop unroll(disable)
     for (int ciOffset = 0; ciOffset < c_superClusterSize; ciOffset++)
     {
         const int aidx = (sci * c_superClusterSize + ciOffset) * c_clSize + tidxi;
@@ -891,13 +892,13 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         const unsigned tidxj = tidx / c_clSize;
 #else
         /* thread/block/warp id-s */
-        /* const unsigned tidxi = itemIdx.get_local_id(2);
+        const unsigned tidxi = itemIdx.get_local_id(2);
         const unsigned tidxj = itemIdx.get_local_id(1);
-        const unsigned tidx  = tidxj * c_clSize + tidxi; */
+        const unsigned tidx  = tidxj * c_clSize + tidxi;
 
-        const unsigned tidx = itemIdx.get_local_linear_id();
+        /* const unsigned tidx = itemIdx.get_local_linear_id();
         const unsigned tidxi = tidx % 8;
-        const unsigned tidxj = tidx / 8;
+        const unsigned tidxj = tidx / 8; */
 
 #endif
 
@@ -1057,6 +1058,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
         // loop over the j clusters = seen by any of the atoms in the current super-cluster
 #ifdef MAIN_LOOP
+        #pragma clang loop unroll(disable)
         for (int jPacked = cijPackedBegin; jPacked < cijPackedEnd; jPacked += 1)
         {
 #ifdef DPCPP
@@ -1104,7 +1106,8 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
             constexpr int unrollFactor = 1; // No unrolling.
 #endif
 
-#pragma unroll unrollFactor
+//#pragma unroll unrollFactor
+            #pragma clang loop unroll(disable)
             for (int jm = 0; jm < c_nbnxnGpuJgroupSize; jm++)
             {
                 const bool maskSet = imask & (superClInteractionMask << (jm * c_superClusterSize));
@@ -1141,6 +1144,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
 #ifdef INNER_FOR
 //#pragma unroll c_superClusterSize
+                #pragma clang loop unroll(disable)
                 for (int i = 0; i < c_superClusterSize; i++)
                 {
 
@@ -1459,10 +1463,10 @@ static void launchNbnxmKernel(const DeviceStream& deviceStream, const int numSci
     // Linear Conversion:
     const sycl::range<3>    blockSize{ 1, 1, c_clSize * c_clSize };
 #else
-    //const sycl::range<3>    blockSize{ 1, c_clSize, c_clSize };
+    const sycl::range<3>    blockSize{ 1, c_clSize, c_clSize };
 
 
-    const sycl::range<3>    blockSize{ 1, 2, 8 };
+    //const sycl::range<3>    blockSize{ 1, 2, 8 };
 #endif
 
     const sycl::range<3>    globalSize{ blockSize[0], blockSize[1], numBlocks * blockSize[2] };
