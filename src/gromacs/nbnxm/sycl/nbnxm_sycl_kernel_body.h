@@ -892,13 +892,16 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         const unsigned tidxj = tidx / c_clSize;
 #else
         /* thread/block/warp id-s */
-        const unsigned tidxi = itemIdx.get_local_id(2);
+        /* const unsigned tidxi = itemIdx.get_local_id(2);
         const unsigned tidxj = itemIdx.get_local_id(1);
         const unsigned tidx  = tidxj * c_clSize + tidxi;
 
-        /* const unsigned tidx = itemIdx.get_local_linear_id();
-        const unsigned tidxi = tidx % 8;
-        const unsigned tidxj = tidx / 8; */
+        //const unsigned tidx = itemIdx.get_local_linear_id();
+        //const unsigned tidxi = tidx % 8;
+        //const unsigned tidxj = tidx / 8; */
+        const unsigned tidx = itemIdx.get_local_linear_id();
+        const unsigned tidxi = tidx % c_clSize;
+        const unsigned tidxj = tidx / c_clSize;
 
 #endif
 
@@ -1463,7 +1466,8 @@ static void launchNbnxmKernel(const DeviceStream& deviceStream, const int numSci
     // Linear Conversion:
     const sycl::range<3>    blockSize{ 1, 1, c_clSize * c_clSize };
 #else
-    const sycl::range<3>    blockSize{ 1, c_clSize, c_clSize };
+    //const sycl::range<3>    blockSize{ 1, c_clSize, c_clSize };
+    const sycl::range<3>    blockSize{ 1, 1, c_clSize * c_clSize };
 
 
     //const sycl::range<3>    blockSize{ 1, 2, 8 };
