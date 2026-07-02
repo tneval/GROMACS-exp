@@ -304,6 +304,32 @@ struct nbnxn_atomdata_t
     //! Return the coordinate buffer, and q with xFormat==nbatXYZQ
     ArrayRef<real> x() { return x_; }
 
+
+    // SoA data
+    //! Return the coordinate buffer, and q with xFormat==nbatXYZQ
+    ArrayRef<const real> xx() const { return x_x; }
+
+    //! Return the coordinate buffer, and q with xFormat==nbatXYZQ
+    ArrayRef<real> xx() { return x_x; }
+
+    ArrayRef<const real> xy() const { return x_y; }
+
+    //! Return the coordinate buffer, and q with xFormat==nbatXYZQ
+    ArrayRef<real> xy() { return x_y; }
+
+    ArrayRef<const real> xz() const { return x_z; }
+
+    //! Return the coordinate buffer, and q with xFormat==nbatXYZQ
+    ArrayRef<real> xz() { return x_z; }
+
+
+    ArrayRef<const real> xq() const { return x_q; }
+
+    //! Return the coordinate buffer, and q with xFormat==nbatXYZQ
+    ArrayRef<real> xq() { return x_q; }
+
+
+
     //! Masks for handling exclusions in the SIMD kernels
     const SimdMasks& simdMasks() const { return simdMasks_; }
 
@@ -377,6 +403,13 @@ public:
 private:
     //! x and possibly q, size natoms*xstride
     HostVector<real> x_;
+
+    // SoA x data.
+    HostVector<real> x_x;
+    HostVector<real> x_y;
+    HostVector<real> x_z;
+    HostVector<real> x_q;
+    //
 
     //! Masks for handling exclusions in the SIMD kernels
     SimdMasks simdMasks_;

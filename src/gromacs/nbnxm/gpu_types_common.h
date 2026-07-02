@@ -173,6 +173,13 @@ struct NBAtomDataGpu
 
     //! atom coordinates + charges, size \ref numAtoms
     DeviceBuffer<Float4> xq;
+    // For SYCL: SoA instead of AoS
+    DeviceBuffer<float> xq_x;
+    DeviceBuffer<float> xq_y;
+    DeviceBuffer<float> xq_z;
+    DeviceBuffer<float> xq_q;
+
+
     //! atom charge(A&B), size numAtoms, only in FEP, use Float4 for coalesencing
     DeviceBuffer<Float4> q4;
     //! force output array, size \ref numAtoms

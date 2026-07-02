@@ -755,7 +755,13 @@ static inline void reduceForceIAndFShift(sycl::local_ptr<float>   sm_buf,
  */
 template<int subGroupSize, bool doPruneNBL, bool doCalcEnergies, enum ElecType elecType, enum VdwType vdwType, typename CommandGroupHandler>
 static auto nbnxmKernel(CommandGroupHandler cgh,
-                        const Float4* __restrict__ gm_xq,
+                        const Float4* __restrict__ gm_xq, // remove this later
+                        // SoA - style input
+                       /*  const float* __restrict__ gm_xq_x,
+                        const float* __restrict__ gm_xq_y,
+                        const float* __restrict__ gm_xq_z,
+                        const float* __restrict__ gm_xq_q, */
+                        //
                         Float3* __restrict__ gm_f,
                         const Float3* __restrict__ gm_shiftVec,
                         Float3* __restrict__ gm_fShift,
@@ -1508,12 +1514,29 @@ void launchNbnxmKernelHelper(NbnxmGpu* nb, const gmx::StepWorkload& stepWork, co
     GMX_ASSERT(doPruneNBL == (plist->haveFreshList && !nb->didPrune[iloc]), "Wrong template called");
     GMX_ASSERT(doCalcEnergies == stepWork.computeEnergy, "Wrong template called");
 
+    /* if(adat->xq.get_pointer() == nullptr){
+        printf("xq IS nullptr\n");
+    }else{
+        printf("xq is NOT nullptr\n");
+    }
+
+    if(adat->xq_x.get_pointer() == nullptr){
+        printf("xq_x IS nullptr\n");
+    }else{
+        printf("xq_x is NOT nullptr\n");
+    } */
+
     chooseAndLaunchNbnxmKernel<subGroupSize, doPruneNBL, doCalcEnergies>(
             nbp->elecType,
             nbp->vdwType,
             deviceStream,
             plist->numSci,
             adat->xq.get_pointer(),
+            // AoS->SoA conversion
+    /*         adat->xq_x.get_pointer(),
+            adat->xq_y.get_pointer(),
+            adat->xq_z.get_pointer(),
+            adat->xq_q.get_pointer(), */
             adat->f.get_pointer(),
             adat->shiftVec.get_pointer(),
             adat->fShift.get_pointer(),

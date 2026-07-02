@@ -353,6 +353,11 @@ static inline void initAtomdataFirst(NBAtomDataGpu*           atomdata,
     /* initialize to nullptr pointers to data that is not allocated here and will
        need reallocation in later */
     atomdata->xq = nullptr;
+    // SoA data
+    atomdata->xq_x = nullptr;
+    atomdata->xq_y = nullptr;
+    atomdata->xq_z = nullptr;
+    atomdata->xq_q = nullptr;
     atomdata->f  = nullptr;
 
     /* size -1 indicates that the respective array hasn't been initialized yet */
@@ -1024,6 +1029,13 @@ void gpu_init_atomdata(NbnxmGpu* nb, const nbnxn_atomdata_t* nbat)
 
             freeDeviceBuffer(&atdat->f);
             freeDeviceBuffer(&atdat->xq);
+            // SoA
+            freeDeviceBuffer(&atdat->xq_x);
+            freeDeviceBuffer(&atdat->xq_y);
+            freeDeviceBuffer(&atdat->xq_z);
+            freeDeviceBuffer(&atdat->xq_q);
+            //
+
             if (useLjCombRule(nb->nbparam->vdwType))
             {
                 freeDeviceBuffer(&atdat->ljComb);
@@ -1049,6 +1061,13 @@ void gpu_init_atomdata(NbnxmGpu* nb, const nbnxn_atomdata_t* nbat)
 
         allocateDeviceBuffer(&atdat->f, numAlloc, deviceContext);
         allocateDeviceBuffer(&atdat->xq, numAlloc, deviceContext);
+
+        // SoA
+        allocateDeviceBuffer(&atdat->xq_x, numAlloc, deviceContext);
+        allocateDeviceBuffer(&atdat->xq_y, numAlloc, deviceContext);
+        allocateDeviceBuffer(&atdat->xq_z, numAlloc, deviceContext);
+        allocateDeviceBuffer(&atdat->xq_q, numAlloc, deviceContext);
+        //
 
         if (useLjCombRule(nb->nbparam->vdwType))
         {
@@ -1528,6 +1547,41 @@ void gpu_copy_xq_to_gpu(NbnxmGpu* nb, const nbnxn_atomdata_t* nbatom, const Atom
                        deviceStream,
                        GpuApiCallBehavior::Async,
                        nullptr);
+
+    // SoA
+    /* copyToDeviceBuffer(&adat->xq_x,
+                       reinterpret_cast<const float*>(nbatom->xx().data()) + atomsRange.begin(),
+                       atomsRange.begin(),
+                       atomsRange.size(),
+                       deviceStream,
+                       GpuApiCallBehavior::Async,
+                       nullptr);
+
+    copyToDeviceBuffer(&adat->xq_y,
+                       reinterpret_cast<const float*>(nbatom->xy().data()) + atomsRange.begin(),
+                       atomsRange.begin(),
+                       atomsRange.size(),
+                       deviceStream,
+                       GpuApiCallBehavior::Async,
+                       nullptr);
+
+    copyToDeviceBuffer(&adat->xq_z,
+                       reinterpret_cast<const float*>(nbatom->xz().data()) + atomsRange.begin(),
+                       atomsRange.begin(),
+                       atomsRange.size(),
+                       deviceStream,
+                       GpuApiCallBehavior::Async,
+                       nullptr);
+
+    copyToDeviceBuffer(&adat->xq_q,
+                       reinterpret_cast<const float*>(nbatom->xq().data()) + atomsRange.begin(),
+                       atomsRange.begin(),
+                       atomsRange.size(),
+                       deviceStream,
+                       GpuApiCallBehavior::Async,
+                       nullptr); */
+
+    //
 
     if (bDoTime)
     {
