@@ -243,6 +243,14 @@ void copyToDeviceBuffer(DeviceBuffer<ValueType>* buffer,
                         GpuApiCallBehavior       transferKind,
                         CommandEvent* gmx_unused timingEvent)
 {
+/*     printf("copying to device buffer!\n");
+ */    /* printf("numValues: %ld\n", numValues);
+    if(hostBuffer == nullptr){
+        printf("is NULLPTR\n");
+    }else{
+        printf("is NOT nullptr\n");
+    } */
+
     if (numValues == 0)
     {
         return; // such calls are actually made with empty domains

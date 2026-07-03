@@ -88,7 +88,7 @@ static inline bool useLjCombRule(const enum VdwType vdwType)
  */
 GPU_FUNC_QUALIFIER
 void gpu_copy_xq_to_gpu(NbnxmGpu gmx_unused*                      nb,
-                        const struct nbnxn_atomdata_t gmx_unused* nbdata,
+                        struct nbnxn_atomdata_t gmx_unused* nbdata,
                         AtomLocality gmx_unused                   aloc) GPU_FUNC_TERM;
 
 /*! \brief

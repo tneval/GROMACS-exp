@@ -119,7 +119,7 @@ void gpu_pme_loadbal_update_param(struct nonbonded_verlet_t gmx_unused* nbv,
 
 /** Uploads shift vector to the GPU if the box is dynamic (otherwise just returns). */
 GPU_FUNC_QUALIFIER
-void gpu_upload_shiftvec(NbnxmGpu gmx_unused* nb, const nbnxn_atomdata_t gmx_unused* nbatom) GPU_FUNC_TERM;
+void gpu_upload_shiftvec(NbnxmGpu gmx_unused* nb, nbnxn_atomdata_t gmx_unused* nbatom) GPU_FUNC_TERM;
 
 /** Clears GPU outputs: nonbonded force, shift force and energy. */
 GPU_FUNC_QUALIFIER

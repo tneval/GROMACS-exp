@@ -80,7 +80,8 @@ enum
     nbatXYZ,
     nbatXYZQ,
     nbatX4,
-    nbatX8
+    nbatX8,
+    nbatSoA
 };
 
 //! Stride for coordinate/force arrays with xyz coordinate storage
@@ -395,6 +396,12 @@ public:
     bool bDynamicBox;
     //! Shift vectors, copied from t_forcerec
     HostVector<RVec> shift_vec;
+
+    HostVector<real> shift_vec_x;
+    HostVector<real> shift_vec_y;
+    HostVector<real> shift_vec_z;
+
+
     //! stride for a coordinate in x (usually 3 or 4)
     int xstride;
     //! stride for a coordinate in f (usually 3 or 4)

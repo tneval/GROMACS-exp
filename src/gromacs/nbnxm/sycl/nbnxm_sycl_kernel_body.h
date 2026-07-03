@@ -51,39 +51,8 @@
 #include "nbnxm_sycl_kernel_utils.h"
 #include "nbnxm_sycl_types.h"
 
-// This setup: 1k steps
-// PoCL (pthreads):
-// 1 CPU: 2.043s, All CPU: 0.896s
-// Intel:
-// 1 CPU: 16.33s, All CPU: 0.944s
 
-/*
-#define MAIN_LOOP
-//#define REDUCE_I
-#define REDUCE_FORCE_J
-#define GROUP_REDUCE
-#define INNER_FOR
-//#define INNERMOST_IF
-*/
-
-
-
-// This setup: 1k steps
-// This setup: 1k steps
-// PoCL (pthreads):
-// 1 CPU: 2.446s, All CPU: 1.011s
-// Intel:
-// 1 CPU: 28.211s, All CPU: 1.252s
-
-
-/*
-#define MAIN_LOOP
-#define REDUCE_I
-#define REDUCE_FORCE_J
-#define GROUP_REDUCE
-#define INNER_FOR
-//#define INNERMOST_IF
-*/
+#define SOA
 
 
 #define MAIN_LOOP
@@ -101,7 +70,6 @@
 
 //#define FLATTENED_GRID
 
-//#define FLATTEN
 
 //#define DPCPP
 
@@ -757,13 +725,17 @@ template<int subGroupSize, bool doPruneNBL, bool doCalcEnergies, enum ElecType e
 static auto nbnxmKernel(CommandGroupHandler cgh,
                         const Float4* __restrict__ gm_xq, // remove this later
                         // SoA - style input
-                       /*  const float* __restrict__ gm_xq_x,
+                        const float* __restrict__ gm_xq_x,
                         const float* __restrict__ gm_xq_y,
                         const float* __restrict__ gm_xq_z,
-                        const float* __restrict__ gm_xq_q, */
+                        const float* __restrict__ gm_xq_q,
                         //
                         Float3* __restrict__ gm_f,
                         const Float3* __restrict__ gm_shiftVec,
+                        const float* __restrict__ gm_shiftVec_x,
+                        const float* __restrict__ gm_shiftVec_y,
+                        const float* __restrict__ gm_shiftVec_z,
+                        //
                         Float3* __restrict__ gm_fShift,
                         float* __restrict__ gm_energyElec,
                         float* __restrict__ gm_energyVdw,
@@ -954,19 +926,40 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 const int ai       = ci * c_clSize + tidxi;
                 const int cacheIdx = (tidxj + i) * c_clSize + tidxi;
 
+
+
+#ifdef SOA
+
+                float shift_x = gm_shiftVec_x[nbSci.shift];
+                float shift_y = gm_shiftVec_y[nbSci.shift];
+                float shift_z = gm_shiftVec_z[nbSci.shift];
+
+                //
+                float xqi_x = gm_xq_x[ai];
+                float xqi_y = gm_xq_y[ai];
+                float xqi_z = gm_xq_z[ai];
+                float xqi_q = gm_xq_q[ai];
+
+
+                xqi_x += shift_x;
+                xqi_y += shift_y;
+                xqi_z += shift_z;
+
+                xqi_q *= epsFac;
+
+                Float4 xqi = Float4(xqi_x, xqi_y, xqi_z, xqi_q);
+
+
+
+#else
                 const Float3 shift = gm_shiftVec[nbSci.shift];
+
                 Float4       xqi   = gm_xq[ai];
                 xqi += Float4(shift[0], shift[1], shift[2], 0.0F);
                 xqi[3] *= epsFac;
-#ifdef FLATTEN
-                sm_xq[cacheIdx] = xqi[0];
-                sm_xq[cacheIdx+1] = xqi[1];
-                sm_xq[cacheIdx+2] = xqi[2];
-#else
-                sm_xq[cacheIdx] = xqi;
 #endif
 
-
+                sm_xq[cacheIdx] = xqi;
 
 /* #ifdef DPCPP
                 if(bidx == 0){
@@ -1507,24 +1500,9 @@ void launchNbnxmKernelHelper(NbnxmGpu* nb, const gmx::StepWorkload& stepWork, co
     auto*               plist        = nb->plist[iloc].get();
     const DeviceStream& deviceStream = *nb->deviceStreams[iloc];
 
-    //auto* a = plist->sci.get_pointer();
-    //std::cout << "begin: " << a->cjPackedBegin << "\n";
-    //std::cout << "end: " << a->cjPackedEnd << "\n";
-
     GMX_ASSERT(doPruneNBL == (plist->haveFreshList && !nb->didPrune[iloc]), "Wrong template called");
     GMX_ASSERT(doCalcEnergies == stepWork.computeEnergy, "Wrong template called");
 
-    /* if(adat->xq.get_pointer() == nullptr){
-        printf("xq IS nullptr\n");
-    }else{
-        printf("xq is NOT nullptr\n");
-    }
-
-    if(adat->xq_x.get_pointer() == nullptr){
-        printf("xq_x IS nullptr\n");
-    }else{
-        printf("xq_x is NOT nullptr\n");
-    } */
 
     chooseAndLaunchNbnxmKernel<subGroupSize, doPruneNBL, doCalcEnergies>(
             nbp->elecType,
@@ -1532,13 +1510,19 @@ void launchNbnxmKernelHelper(NbnxmGpu* nb, const gmx::StepWorkload& stepWork, co
             deviceStream,
             plist->numSci,
             adat->xq.get_pointer(),
-            // AoS->SoA conversion
-    /*         adat->xq_x.get_pointer(),
+            // xq SoA
+            adat->xq_x.get_pointer(),
             adat->xq_y.get_pointer(),
             adat->xq_z.get_pointer(),
-            adat->xq_q.get_pointer(), */
+            adat->xq_q.get_pointer(),
+            //
             adat->f.get_pointer(),
             adat->shiftVec.get_pointer(),
+            // ShiftVec SoA
+            adat->shiftVec_x.get_pointer(),
+            adat->shiftVec_y.get_pointer(),
+            adat->shiftVec_z.get_pointer(),
+            //
             adat->fShift.get_pointer(),
             adat->eElec.get_pointer(),
             adat->eLJ.get_pointer(),

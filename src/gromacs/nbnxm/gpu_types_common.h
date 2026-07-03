@@ -219,6 +219,12 @@ struct NBAtomDataGpu
     DeviceBuffer<Float4> ljComb4;
     //! shifts
     DeviceBuffer<Float3> shiftVec;
+
+    // shiftVec SoA:
+    DeviceBuffer<float> shiftVec_x;
+    DeviceBuffer<float> shiftVec_y;
+    DeviceBuffer<float> shiftVec_z;
+
     //! true if the shift vector has been uploaded
     bool shiftVecUploaded;
 };

@@ -97,6 +97,13 @@ void nbnxn_atomdata_t::resizeCoordinateBuffer(const int numAtoms, const int doma
     }
 
     x_.resize(numAtoms * xstride);
+
+    // SoA versions
+    x_x.resize(numAtoms);
+    x_y.resize(numAtoms);
+    x_z.resize(numAtoms);
+    x_q.resize(numAtoms);
+
 }
 
 void nbnxn_atomdata_t::resizeForceBuffers()
@@ -295,6 +302,17 @@ static void copyRVecToNbatXYZReal(int numAtoms, const rvec* x, real* xnb, int a0
         xnb[atomOffset + 0] = x[a][XX];
         xnb[atomOffset + 1] = x[a][YY];
         xnb[atomOffset + 2] = x[a][ZZ];
+    }
+}
+
+
+static void copyRVecToNbatSoAReal(int numAtoms, const rvec* x, real* xx, real* xy, real* xz, int a0)
+{
+    for (int a = a0; a < a0 + numAtoms; a++)
+    {
+        xx[a] = x[a][XX];
+        xy[a] = x[a][YY];
+        xz[a] = x[a][ZZ];
     }
 }
 
@@ -708,6 +726,13 @@ nbnxn_atomdata_t::nbnxn_atomdata_t(PinningPolicy                           pinni
     numLocalAtoms_(0),
     shift_vec({}, { pinningPolicy }),
     x_({}, { pinningPolicy }),
+
+    // SoA
+    x_x({}, { pinningPolicy }),
+    x_y({}, { pinningPolicy }),
+    x_z({}, { pinningPolicy }),
+    x_q({}, { pinningPolicy }),
+
     simdMasks_(kernelType),
     useBufferFlags_(numOutputBuffers > 1)
 {
@@ -748,7 +773,14 @@ nbnxn_atomdata_t::nbnxn_atomdata_t(PinningPolicy                           pinni
         FFormat = nbatXYZ;
     }
 
+    //XFormat = nbatSoA;
+
     shift_vec.resize(c_numShiftVectors);
+
+    // Resize SoA shiftVectors
+    shift_vec_x.resize(c_numShiftVectors);
+    shift_vec_y.resize(c_numShiftVectors);
+    shift_vec_z.resize(c_numShiftVectors);
 
     xstride = (XFormat == nbatXYZQ ? STRIDE_XYZQ : DIM);
     fstride = (FFormat == nbatXYZQ ? STRIDE_XYZQ : DIM);
@@ -948,6 +980,9 @@ static void nbnxn_atomdata_set_charges(nbnxn_atomdata_t*    nbat,
                                        ArrayRef<const real> chargesB,
                                        const bool           useGpuNonbondedFE)
 {
+
+/*     printf("nbnxn_atomdata_set_charges CALLED\n");
+ */
     if (nbat->XFormat != nbatXYZQ)
     {
         nbat->paramsDeprecated().q.resize(nbat->numAtoms());
@@ -1145,11 +1180,31 @@ void nbnxn_atomdata_copy_shiftvec(std::optional<bool>  haveDynamicBox,
 {
     GMX_ASSERT(shiftVectors.size() == nbat->shift_vec.size(), "Shift vector sizes should match");
 
+
+    // Packed as xyzxyz
+    //auto shift_data = nbat->shift_vec.data();
+
+    auto shift_x_data = nbat->shift_vec_x.data();
+    auto shift_y_data = nbat->shift_vec_y.data();
+    auto shift_z_data = nbat->shift_vec_z.data();
+
+
+
     if (haveDynamicBox.has_value())
     {
         nbat->bDynamicBox = haveDynamicBox.value();
     }
     std::copy(shiftVectors.begin(), shiftVectors.end(), nbat->shift_vec.begin());
+
+    for(int i = 0; i < nbat->shift_vec.size(); i++){
+        /* shift_x_data[i] = 0.0f;
+        shift_y_data[i] = 0.0f;
+        shift_z_data[i] = 0.0f; */
+        shift_x_data[i] = shiftVectors[i][0];
+        shift_y_data[i] = shiftVectors[i][1];
+        shift_z_data[i] = shiftVectors[i][2];
+    }
+
 }
 
 // Returns the used range of grids for the given locality
@@ -1195,6 +1250,9 @@ static void copyXToNbatXForGridPart(const Grid&       grid,
 
         switch (nbat->XFormat)
         {
+            case nbatSoA:
+                copyRVecToNbatSoAReal(na, coordinates, nbat->xx().data(), nbat->xy().data(), nbat->xz().data(), ash);
+                break;
             case nbatXYZ:
                 copyRVecToNbatXYZReal<STRIDE_XYZ>(na, coordinates, nbat->x().data(), ash);
                 break;
@@ -1269,6 +1327,26 @@ void nbnxn_atomdata_copy_x_to_nbat_x(const GridSet&     gridSet,
         }
         GMX_CATCH_ALL_AND_EXIT_WITH_FATAL_ERROR
     }
+/*
+    auto x_data = nbat->x().data();
+
+    auto xx_data = nbat->xx().data();
+    auto xy_data = nbat->xy().data();
+    auto xz_data = nbat->xz().data();
+    auto xq_data = nbat->xq().data();
+
+
+    printf("copying SoA structures!\n");
+    // Copy to SoA structures:
+    for(int i = 0; i < nbat->numAtoms(); i++){
+        xx_data[i] = x_data[(i*4)];
+        xy_data[i] = x_data[(i*4)+1];
+        xz_data[i] = x_data[(i*4)+2];
+        xq_data[i] = x_data[(i*4)+3];
+
+    } */
+
+
 }
 
 /* Copies (and reorders) the coordinates to nbnxn_atomdata_t on the GPU*/

@@ -154,11 +154,13 @@ void nonbonded_verlet_t::setAtomProperties(ArrayRef<const int>     atomTypesA,
 
 void nonbonded_verlet_t::convertCoordinates(const AtomLocality locality, ArrayRef<const RVec> coordinates)
 {
-    wallcycle_start(wcycle_, WallCycleCounter::NbXFBufOps);
+/*     printf("convertCoordinates called\n");
+ */    wallcycle_start(wcycle_, WallCycleCounter::NbXFBufOps);
     wallcycle_sub_start(wcycle_, WallCycleSubCounter::NBXBufOps);
 
     nbnxn_atomdata_copy_x_to_nbat_x(
             pairSearch_->gridSet(), locality, as_rvec_array(coordinates.data()), nbat_.get());
+
 
     wallcycle_sub_stop(wcycle_, WallCycleSubCounter::NBXBufOps);
     wallcycle_stop(wcycle_, WallCycleCounter::NbXFBufOps);
@@ -168,7 +170,8 @@ void nonbonded_verlet_t::convertCoordinatesGpu(const AtomLocality    locality,
                                                DeviceBuffer<RVec>    d_x,
                                                GpuEventSynchronizer* xReadyOnDevice)
 {
-    wallcycle_start(wcycle_, WallCycleCounter::LaunchGpuPp);
+/*     printf("convertCoordinatesGpu called\n");
+ */    wallcycle_start(wcycle_, WallCycleCounter::LaunchGpuPp);
     wallcycle_sub_start(wcycle_, WallCycleSubCounter::LaunchGpuNBXBufOps);
 
     nbnxn_atomdata_x_to_nbat_x_gpu(pairSearch_->gridSet(), locality, gpuNbv_, d_x, xReadyOnDevice);

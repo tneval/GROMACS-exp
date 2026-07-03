@@ -322,6 +322,13 @@ static inline void initAtomdataFirst(NBAtomDataGpu*           atomdata,
 {
     atomdata->numTypes = numTypes;
     allocateDeviceBuffer(&atomdata->shiftVec, c_numShiftVectors, deviceContext);
+
+    // Allocate SoA arrays.
+    allocateDeviceBuffer(&atomdata->shiftVec_x, c_numShiftVectors, deviceContext);
+    allocateDeviceBuffer(&atomdata->shiftVec_y, c_numShiftVectors, deviceContext);
+    allocateDeviceBuffer(&atomdata->shiftVec_z, c_numShiftVectors, deviceContext);
+
+
     atomdata->shiftVecUploaded = false;
 
     allocateDeviceBuffer(&atomdata->fShift, c_numShiftVectors, deviceContext);
@@ -710,10 +717,30 @@ void gpu_pme_loadbal_update_param(nonbonded_verlet_t* nbv, const interaction_con
             *ic.coulombEwaldTables, nbp, *nb->deviceContext_, *nb->deviceStreams[InteractionLocality::Local]);
 }
 
-void gpu_upload_shiftvec(NbnxmGpu* nb, const nbnxn_atomdata_t* nbatom)
+void gpu_upload_shiftvec(NbnxmGpu* nb, nbnxn_atomdata_t* nbatom)
 {
     NBAtomDataGpu*      adat        = nb->atdat;
     const DeviceStream& localStream = *nb->deviceStreams[InteractionLocality::Local];
+
+    /* // Packed as xyzxyz
+    auto shift_data = nbatom->shift_vec.data();
+
+    auto shift_x_data = nbatom->shift_vec_x.data();
+    auto shift_y_data = nbatom->shift_vec_y.data();
+    auto shift_z_data = nbatom->shift_vec_z.data();
+
+
+
+    // Copy to SoA structures:
+    for(int i = 0; i < nbatom->numAtoms(); i++){
+        xx_data[i] = x_data[(i*4)];
+        xy_data[i] = x_data[(i*4)+1];
+        xz_data[i] = x_data[(i*4)+2];
+        xq_data[i] = x_data[(i*4)+3];
+
+    }
+
+ */
 
     /* only if we have a dynamic box */
     if (nbatom->bDynamicBox || !adat->shiftVecUploaded)
@@ -726,6 +753,35 @@ void gpu_upload_shiftvec(NbnxmGpu* nb, const nbnxn_atomdata_t* nbatom)
                            GpuApiCallBehavior::Async,
                            nullptr);
         adat->shiftVecUploaded = true;
+
+        copyToDeviceBuffer(&adat->shiftVec_x,
+                           reinterpret_cast<const float*>(nbatom->shift_vec_x.data()),
+                           0,
+                           c_numShiftVectors,
+                           localStream,
+                           GpuApiCallBehavior::Async,
+                           nullptr);
+        adat->shiftVecUploaded = true;
+
+        copyToDeviceBuffer(&adat->shiftVec_y,
+                           reinterpret_cast<const float*>(nbatom->shift_vec_y.data()),
+                           0,
+                           c_numShiftVectors,
+                           localStream,
+                           GpuApiCallBehavior::Async,
+                           nullptr);
+        adat->shiftVecUploaded = true;
+
+        copyToDeviceBuffer(&adat->shiftVec_z,
+                           reinterpret_cast<const float*>(nbatom->shift_vec_z.data()),
+                           0,
+                           c_numShiftVectors,
+                           localStream,
+                           GpuApiCallBehavior::Async,
+                           nullptr);
+        adat->shiftVecUploaded = true;
+
+
     }
 }
 
@@ -1494,7 +1550,7 @@ void nbnxnInsertNonlocalGpuDependency(NbnxmGpu* nb, const InteractionLocality in
 }
 
 /*! \brief Launch asynchronously the xq buffer host to device copy. */
-void gpu_copy_xq_to_gpu(NbnxmGpu* nb, const nbnxn_atomdata_t* nbatom, const AtomLocality atomLocality)
+void gpu_copy_xq_to_gpu(NbnxmGpu* nb, nbnxn_atomdata_t* nbatom, const AtomLocality atomLocality)
 {
     GMX_ASSERT(nb, "Need a valid nbnxn_gpu object");
 
@@ -1537,6 +1593,30 @@ void gpu_copy_xq_to_gpu(NbnxmGpu* nb, const nbnxn_atomdata_t* nbatom, const Atom
         timers->xf[atomLocality].nb_h2d.openTimingRegion(deviceStream);
     }
 
+
+    /* printf("Number of atoms: %d\tatomsRange.begin(). %d\tatomsRange.size(): %d\n",nbatom->numAtoms(), atomsRange.begin(),atomsRange.size()); */
+
+    auto x_data = nbatom->x().data();
+
+    auto xx_data = nbatom->xx().data();
+    auto xy_data = nbatom->xy().data();
+    auto xz_data = nbatom->xz().data();
+    auto xq_data = nbatom->xq().data();
+
+
+   /*  printf("copying SoA structures!\n"); */
+    // Copy to SoA structures:
+    for(int i = 0; i < nbatom->numAtoms(); i++){
+        xx_data[i] = x_data[(i*4)];
+        xy_data[i] = x_data[(i*4)+1];
+        xz_data[i] = x_data[(i*4)+2];
+        xq_data[i] = x_data[(i*4)+3];
+
+    }
+
+
+
+
     /* HtoD x, q */
     GMX_ASSERT(nbatom->XFormat == nbatXYZQ,
                "The coordinates should be in xyzq format to copy to the Float4 device buffer.");
@@ -1549,7 +1629,7 @@ void gpu_copy_xq_to_gpu(NbnxmGpu* nb, const nbnxn_atomdata_t* nbatom, const Atom
                        nullptr);
 
     // SoA
-    /* copyToDeviceBuffer(&adat->xq_x,
+    copyToDeviceBuffer(&adat->xq_x,
                        reinterpret_cast<const float*>(nbatom->xx().data()) + atomsRange.begin(),
                        atomsRange.begin(),
                        atomsRange.size(),
@@ -1579,7 +1659,7 @@ void gpu_copy_xq_to_gpu(NbnxmGpu* nb, const nbnxn_atomdata_t* nbatom, const Atom
                        atomsRange.size(),
                        deviceStream,
                        GpuApiCallBehavior::Async,
-                       nullptr); */
+                       nullptr);
 
     //
 
