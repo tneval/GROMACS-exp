@@ -125,6 +125,11 @@ struct nbnxn_atomdata_output_t
 
     //! f, size natoms*fstride
     HostVector<real> f;
+
+    HostVector<real> fx;
+    HostVector<real> fy;
+    HostVector<real> fz;
+
     //! Shift force array, size c_numShiftVectors*DIM
     HostVector<real> fshift;
     //! Temporary Van der Waals group energy storage

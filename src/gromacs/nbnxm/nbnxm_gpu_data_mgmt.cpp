@@ -1084,6 +1084,10 @@ void gpu_init_atomdata(NbnxmGpu* nb, const nbnxn_atomdata_t* nbat)
             localStream.synchronize();
 
             freeDeviceBuffer(&atdat->f);
+            freeDeviceBuffer(&atdat->fx);
+            freeDeviceBuffer(&atdat->fy);
+            freeDeviceBuffer(&atdat->fz);
+
             freeDeviceBuffer(&atdat->xq);
             // SoA
             freeDeviceBuffer(&atdat->xq_x);
@@ -1116,6 +1120,11 @@ void gpu_init_atomdata(NbnxmGpu* nb, const nbnxn_atomdata_t* nbat)
 
 
         allocateDeviceBuffer(&atdat->f, numAlloc, deviceContext);
+
+        allocateDeviceBuffer(&atdat->fx, numAlloc, deviceContext);
+        allocateDeviceBuffer(&atdat->fy, numAlloc, deviceContext);
+        allocateDeviceBuffer(&atdat->fz, numAlloc, deviceContext);
+
         allocateDeviceBuffer(&atdat->xq, numAlloc, deviceContext);
 
         // SoA
@@ -1159,6 +1168,9 @@ void gpu_init_atomdata(NbnxmGpu* nb, const nbnxn_atomdata_t* nbat)
     if (realloced)
     {
         clearDeviceBufferAsync(&atdat->f, 0, atdat->numAtomsAlloc, localStream);
+        clearDeviceBufferAsync(&atdat->fx, 0, atdat->numAtomsAlloc, localStream);
+        clearDeviceBufferAsync(&atdat->fy, 0, atdat->numAtomsAlloc, localStream);
+        clearDeviceBufferAsync(&atdat->fz, 0, atdat->numAtomsAlloc, localStream);
     }
 
     if (useLjCombRule(nb->nbparam->vdwType))
@@ -1264,6 +1276,11 @@ void gpu_clear_outputs(NbnxmGpu* nb, bool computeVirial)
     const DeviceStream& localStream = *nb->deviceStreams[InteractionLocality::Local];
     // Clear forces
     clearDeviceBufferAsync(&adat->f, 0, nb->atdat->numAtoms, localStream);
+
+    clearDeviceBufferAsync(&adat->fx, 0, nb->atdat->numAtoms, localStream);
+    clearDeviceBufferAsync(&adat->fy, 0, nb->atdat->numAtoms, localStream);
+    clearDeviceBufferAsync(&adat->fz, 0, nb->atdat->numAtoms, localStream);
+
     // Clear shift force array and energies if the outputs were used in the current step
     if (computeVirial)
     {
@@ -1384,6 +1401,12 @@ void gpu_launch_cpyback(NbnxmGpu*                nb,
     /* DtoH f */
     if (!stepWork.useGpuFBufferOps)
     {
+
+        for(int i = 0; i < atomsRange.size(); i++){
+            //printf("i: %d\t%f - %f - %f\n",i, nbatom->outputBuffer(0).f.data()[i*3 + 0], nbatom->outputBuffer(0).f.data()[i*3 + 1], nbatom->outputBuffer(0).f.data()[i*3 + 2]);
+            //printf("i: %d\t%f - %f - %f\n",i, nbatom->outputBuffer(0).fx.data()[i], nbatom->outputBuffer(0).fy.data()[i],nbatom->outputBuffer(0).fz.data()[i]);
+        }
+
         static_assert(
                 sizeof(*nbatom->outputBuffer(0).f.data()) == sizeof(float),
                 "The host force buffer should be in single precision to match device data size.");
@@ -1393,8 +1416,48 @@ void gpu_launch_cpyback(NbnxmGpu*                nb,
                 atomsRange.begin(),
                 atomsRange.size(),
                 deviceStream,
-                GpuApiCallBehavior::Async,
+                GpuApiCallBehavior::Sync,
                 bDoTime ? timers->xf[atomLocality].nb_d2h.fetchNextEvent() : nullptr);
+
+
+        copyFromDeviceBuffer(
+                reinterpret_cast<float*>(nbatom->outputBuffer(0).fx.data()) + atomsRange.begin(),
+                &adat->fx,
+                atomsRange.begin(),
+                atomsRange.size(),
+                deviceStream,
+                GpuApiCallBehavior::Sync,
+                bDoTime ? timers->xf[atomLocality].nb_d2h.fetchNextEvent() : nullptr);
+
+
+        copyFromDeviceBuffer(
+            reinterpret_cast<float*>(nbatom->outputBuffer(0).fy.data()) + atomsRange.begin(),
+            &adat->fy,
+            atomsRange.begin(),
+            atomsRange.size(),
+            deviceStream,
+            GpuApiCallBehavior::Sync,
+            bDoTime ? timers->xf[atomLocality].nb_d2h.fetchNextEvent() : nullptr);
+
+
+        copyFromDeviceBuffer(
+                reinterpret_cast<float*>(nbatom->outputBuffer(0).fz.data()) + atomsRange.begin(),
+                &adat->fz,
+                atomsRange.begin(),
+                atomsRange.size(),
+                deviceStream,
+                GpuApiCallBehavior::Sync,
+                bDoTime ? timers->xf[atomLocality].nb_d2h.fetchNextEvent() : nullptr);
+
+
+        //printf("after\n");
+        for(int i = 0; i < atomsRange.size(); i++){
+            /* printf("i: %d\t%f - %f - %f\n",i, nbatom->outputBuffer(0).f.data()[i*3 + 0], nbatom->outputBuffer(0).f.data()[i*3 + 1], nbatom->outputBuffer(0).f.data()[i*3 + 2]);
+            printf("i: %d\t%f - %f - %f\n",i, nbatom->outputBuffer(0).fx.data()[i], nbatom->outputBuffer(0).fy.data()[i],nbatom->outputBuffer(0).fz.data()[i]); */
+            nbatom->outputBuffer(0).f.data()[i*3 + 0] = nbatom->outputBuffer(0).fx.data()[i];
+            nbatom->outputBuffer(0).f.data()[i*3 + 1] = nbatom->outputBuffer(0).fy.data()[i];
+            nbatom->outputBuffer(0).f.data()[i*3 + 2] = nbatom->outputBuffer(0).fz.data()[i];
+        }
 
         issueClFlushInStream(deviceStream);
     }
@@ -1817,6 +1880,12 @@ void gpu_free(NbnxmGpu* nb)
     /* Free atdat */
     freeDeviceBuffer(&(nb->atdat->xq));
     freeDeviceBuffer(&(nb->atdat->f));
+
+    freeDeviceBuffer(&(nb->atdat->fx));
+    freeDeviceBuffer(&(nb->atdat->fy));
+    freeDeviceBuffer(&(nb->atdat->fz));
+
+
     freeDeviceBuffer(&(nb->atdat->eLJ));
     freeDeviceBuffer(&(nb->atdat->eElec));
     freeDeviceBuffer(&(nb->atdat->dvdlLJ));

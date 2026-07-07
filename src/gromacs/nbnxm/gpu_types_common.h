@@ -185,6 +185,10 @@ struct NBAtomDataGpu
     //! force output array, size \ref numAtoms
     DeviceBuffer<Float3> f;
 
+    DeviceBuffer<float> fx;
+    DeviceBuffer<float> fy;
+    DeviceBuffer<float> fz;
+
     //! LJ energy output, size 1
     DeviceBuffer<float> eLJ;
     //! Electrostatics energy input, size 1

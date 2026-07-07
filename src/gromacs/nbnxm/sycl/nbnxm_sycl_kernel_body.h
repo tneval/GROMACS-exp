@@ -65,7 +65,7 @@
 
 #define DO_CALC_ENERGIES
 #define ELEC_CUTOFF
-#define ACCUMULATE_FORCES
+
 
 
 //#define FLATTENED_GRID
@@ -160,7 +160,7 @@ static inline void reduceForceJAmdDpp(Float3 f, const int tidxi, const int aidx,
  * c_clSize consecutive threads hold the force components of a j-atom which we
  * reduced in log2(cl_Size) steps using shift and atomically accumulate them into \p a_f.
  */
-#ifdef FLATTEN
+#ifdef SOA
 static inline void reduceForceJShuffle(float f_x, float f_y, float f_z,
 #else
 static inline void reduceForceJShuffle(Float3                   f,
@@ -168,14 +168,19 @@ static inline void reduceForceJShuffle(Float3                   f,
                                        const sycl::nd_item<3>&  itemIdx,
                                        const int                tidxi,
                                        const int                aidx,
+#ifdef SOA
+                                       sycl::global_ptr<float> a_fx, sycl::global_ptr<float> a_fy, sycl::global_ptr<float> a_fz,
                                        sycl::global_ptr<Float3> a_f)
+#else
+                                       sycl::global_ptr<Float3> a_f)
+#endif
 {
 
     constexpr int c_clSize = sc_gpuClusterSize(sc_layoutType);
     static_assert(c_clSize == 8 || c_clSize == 4);
     sycl::sub_group sg = itemIdx.get_sub_group();
 
-#ifdef FLATTEN
+#ifdef SOA
     f_x += sycl::shift_group_left(sg, f_x, 1);
     f_y += sycl::shift_group_right(sg, f_y, 1);
     f_z += sycl::shift_group_left(sg, f_z, 1);
@@ -196,10 +201,20 @@ static inline void reduceForceJShuffle(Float3                   f,
     }
 
 
-    if (tidxi < 3)
+    if(tidxi == 0){
+        atomicFetchAdd(a_fx[aidx], f_x);
+    }else if(tidxi == 1){
+        atomicFetchAdd(a_fy[aidx], f_x);
+    }else if(tidxi == 2){
+        atomicFetchAdd(a_fz[aidx], f_x);
+    }
+
+
+    /* if (tidxi < 3)
     {
         atomicFetchAdd(a_f[aidx][tidxi], f_x);
-    }
+    } */
+
 #else
 
 
@@ -316,7 +331,7 @@ static inline void reduceForceJGeneric(sycl::local_ptr<float>   sm_buf,
  */
 template<bool useShuffleReduction>
 static inline void reduceForceJ(sycl::local_ptr<float>   sm_buf,
-#ifdef FLATTEN
+#ifdef SOA
                                 float f_x,
                                 float f_y,
                                 float f_z,
@@ -327,7 +342,12 @@ static inline void reduceForceJ(sycl::local_ptr<float>   sm_buf,
                                 const int                tidxi,
                                 const int                tidxj,
                                 const int                aidx,
+#ifdef SOA
+                                sycl::global_ptr<float> a_fx, sycl::global_ptr<float> a_fy, sycl::global_ptr<float> a_fz,
                                 sycl::global_ptr<Float3> a_f)
+#else
+                                sycl::global_ptr<Float3> a_f)
+#endif
 {
     /* if constexpr (!useShuffleReduction)
     {
@@ -338,8 +358,8 @@ static inline void reduceForceJ(sycl::local_ptr<float>   sm_buf,
 #if defined(__SYCL_DEVICE_ONLY__) && defined(__AMDGCN__)
         reduceForceJAmdDpp(f, tidxi, aidx, a_f);
 #else */
-#ifdef FLATTEN
-        reduceForceJShuffle(f_x, f_y, f_z, itemIdx, tidxi, aidx, a_f);
+#ifdef SOA
+        reduceForceJShuffle(f_x, f_y, f_z, itemIdx, tidxi, aidx, a_fx, a_fy, a_fz, a_f);
 #else
         reduceForceJShuffle(f, itemIdx, tidxi, aidx, a_f);
 #endif
@@ -470,6 +490,9 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
         const int                tidxj,
         const int                sci,
         const int                shift,
+        sycl::global_ptr<float> a_fx,
+        sycl::global_ptr<float> a_fy,
+        sycl::global_ptr<float> a_fz,
         sycl::global_ptr<Float3> a_f,
         sycl::global_ptr<Float3> a_fShift)
 {
@@ -482,69 +505,14 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
 
     float fShiftBuf = 0.0F;
 
-#if defined(__SYCL_DEVICE_ONLY__) && defined(__AMDGCN__) && (defined(__GFX8__) || defined(__GFX9__))
-    // Use AMD's cross-lane DPP reduction only for 64-wide exec
-    // can't use static_assert because 32-wide compiler passes will trip on it
-    SYCL_ASSERT(numShuffleReductionSteps == 3);
-#    pragma unroll c_superClusterSize
-    for (int ciOffset = 0; ciOffset < c_superClusterSize; ciOffset++)
-    {
-        const int aidx = (sci * c_superClusterSize + ciOffset) * c_clSize + tidxj;
-        float     fx   = fCiBufX(ciOffset);
-        float     fy   = fCiBufY(ciOffset);
-        float     fz   = fCiBufZ(ciOffset);
-
-        // Transpose values so DPP-based reduction can be used later
-        fx = sycl::select_from_group(sg, fx, tidxi * c_clSize + tidxj);
-        fy = sycl::select_from_group(sg, fy, tidxi * c_clSize + tidxj);
-        fz = sycl::select_from_group(sg, fz, tidxi * c_clSize + tidxj);
-
-        fx += amdDppUpdateShfl<float, /* row_shl:1 */ 0x101>(fx);
-        fy += amdDppUpdateShfl<float, /* row_shr:1 */ 0x111>(fy);
-        fz += amdDppUpdateShfl<float, /* row_shl:1 */ 0x101>(fz);
-
-        if (tidxi & 1)
-        {
-            fx = fy;
-        }
-
-        fx += amdDppUpdateShfl<float, /* row_shl:2 */ 0x102>(fx);
-        fz += amdDppUpdateShfl<float, /* row_shr:2 */ 0x112>(fz);
-
-        if (tidxi & 2)
-        {
-            fx = fz;
-        }
-
-        fx += amdDppUpdateShfl<float, /* row_shl:4 */ 0x104>(fx);
-
-        // Threads 0,1,2 increment X, Y, Z for their sub-groups
-        if (tidxi < 3)
-        {
-            float* ptr = indexedAddress(reinterpret_cast<float*>(a_f.get()), 3 * aidx + tidxi);
-            atomicFetchAdd(*ptr, fx);
-
-            if (calcFShift)
-            {
-                fShiftBuf += fx;
-            }
-        }
-    }
-    /* add up local shift forces into global mem */
-    if (calcFShift)
-    {
-        if ((tidxi) < 3)
-        {
-            float* ptr = indexedAddress(reinterpret_cast<float*>(a_fShift.get()), 3 * shift + tidxi);
-            atomicFetchAdd(*ptr, fShiftBuf);
-        }
-    }
-
-#else // defined(__SYCL_DEVICE_ONLY__) && defined(__AMDGCN__) && (defined(__GFX8__) || defined(__GFX9__))
-
     // Thread mask to use to select first three threads (in tidxj) in each reduction "tree".
     // Two bits for two steps, three bits for three steps.
+
+
     constexpr int threadBitMask = (1U << numShuffleReductionSteps) - 1;
+
+
+    /* sycl::ext::oneapi::experimental::printf("numShuffleSteps: %d\tthreadbitMask: %d\n", numShuffleReductionSteps, threadBitMask); */
 
 //#    pragma unroll c_superClusterSize
     #pragma clang loop unroll(disable)
@@ -575,9 +543,59 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
         {
             fx += sycl::shift_group_left(sg, fx, 4 * c_clSize);
         }
+
+#ifdef SOA
+
+        //int cond = tidxj & threadBitMask;
+
+        if((tidxj == 0) || (tidxj == 4)){
+            atomicFetchAdd(a_fx[aidx], fx);
+        }
+
+        else if((tidxj == 1) || (tidxj == 5)){
+            atomicFetchAdd(a_fy[aidx], fx);
+        }
+
+        if((tidxj == 2) || (tidxj == 6)){
+            atomicFetchAdd(a_fz[aidx], fx);
+        }
+
+
+
+        if((tidxj & threadBitMask) < 3){
+            if (calcFShift)
+            {
+                fShiftBuf += fx;
+            }
+        }
+
+
+        /* if((tidxj & threadBitMask) < 3){
+            if((tidxj & threadBitMask) == 0){
+                atomicFetchAdd(a_fx[aidx], fx);
+            }else if((tidxj & threadBitMask) == 1){
+                atomicFetchAdd(a_fy[aidx], fx);
+
+            }else if((tidxj & threadBitMask) == 2){
+            //}else{
+                atomicFetchAdd(a_fz[aidx], fx);
+            }
+
+
+            if (calcFShift)
+            {
+                fShiftBuf += fx;
+            }
+
+        } */
+
+#else
+
+
         // Threads 0,1,2 (and 4,5,6 in case of numShuffleReductionSteps == 2) increment X, Y, Z for their sub-groups
         if ((tidxj & threadBitMask) < 3)
         {
+
             atomicFetchAdd(a_f[aidx][(tidxj & threadBitMask)], fx);
 
             if (calcFShift)
@@ -585,6 +603,10 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
                 fShiftBuf += fx;
             }
         }
+
+#endif
+
+
     }
     /* add up local shift forces into global mem */
     if (calcFShift)
@@ -594,7 +616,6 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
             atomicFetchAdd(a_fShift[shift][(tidxj & threadBitMask)], fShiftBuf);
         }
     }
-#endif // defined(__SYCL_DEVICE_ONLY__) && defined(__AMDGCN__) && (defined(__GFX8__) || defined(__GFX9__))
 }
 
 /*! \brief \c reduceForceIAndFShiftShuffles specialization for single-step reduction (e.g., Intel iGPUs).
@@ -697,6 +718,9 @@ static inline void reduceForceIAndFShift(sycl::local_ptr<float>   sm_buf,
                                          const int                tidxj,
                                          const int                sci,
                                          const int                shift,
+                                         sycl::global_ptr<float> a_fx,
+                                         sycl::global_ptr<float> a_fy,
+                                         sycl::global_ptr<float> a_fz,
                                          sycl::global_ptr<Float3> a_f,
                                          sycl::global_ptr<Float3> a_fShift)
 {
@@ -709,7 +733,7 @@ static inline void reduceForceIAndFShift(sycl::local_ptr<float>   sm_buf,
         static_assert(numSteps > 0 && numSteps <= 3,
                       "Invalid combination of sub-group size and cluster size");
         reduceForceIAndFShiftShuffles<numSteps>(
-                fCiBufX, fCiBufY, fCiBufZ, calcFShift, itemIdx, tidxi, tidxj, sci, shift, a_f, a_fShift);
+                fCiBufX, fCiBufY, fCiBufZ, calcFShift, itemIdx, tidxi, tidxj, sci, shift, a_fx, a_fy, a_fz, a_f, a_fShift);
     }
     else
     {
@@ -731,6 +755,9 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                         const float* __restrict__ gm_xq_q,
                         //
                         Float3* __restrict__ gm_f,
+                        float* __restrict__ gm_fx,
+                        float* __restrict__ gm_fy,
+                        float* __restrict__ gm_fz,
                         const Float3* __restrict__ gm_shiftVec,
                         const float* __restrict__ gm_shiftVec_x,
                         const float* __restrict__ gm_shiftVec_y,
@@ -798,14 +825,28 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
     // Local memory buffer for i x+q pre-loading
 
-#ifdef FLATTEN
-    using Xq        = StaticLocalStorage<float, c_superClusterSize * c_clSize *4>;
+#ifdef SOA
+    using Xq_x = StaticLocalStorage<float, c_superClusterSize * c_clSize>;
+    using Xq_y = StaticLocalStorage<float, c_superClusterSize * c_clSize>;
+    using Xq_z = StaticLocalStorage<float, c_superClusterSize * c_clSize>;
+    using Xq_q = StaticLocalStorage<float, c_superClusterSize * c_clSize>;
+
+    auto sm_xxHostStorage = Xq_x::makeHostStorage(cgh);
+    auto sm_xyHostStorage = Xq_y::makeHostStorage(cgh);
+    auto sm_xzHostStorage = Xq_z::makeHostStorage(cgh);
+    auto sm_xqHostStorage = Xq_q::makeHostStorage(cgh);
+
+    using Xq        = StaticLocalStorage<Float4, c_superClusterSize * c_clSize>;
+    //auto sm_xqHostStorage        = Xq::makeHostStorage(cgh);
+
 #else
     using Xq        = StaticLocalStorage<Float4, c_superClusterSize * c_clSize>;
+    auto sm_xqHostStorage        = Xq::makeHostStorage(cgh);
 #endif
+
     using AtomTypeI = StaticLocalStorage<int, c_superClusterSize * c_clSize, !props.vdwComb>;
     using LjCombI   = StaticLocalStorage<Float2, c_superClusterSize * c_clSize, props.vdwComb>;
-    auto sm_xqHostStorage        = Xq::makeHostStorage(cgh);
+
     auto sm_atomTypeIHostStorage = AtomTypeI::makeHostStorage(cgh);
     auto sm_ljCombIHostStorage   = LjCombI::makeHostStorage(cgh);
 
@@ -849,8 +890,11 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         typename ReductionBuffer::DeviceStorage sm_reductionBufferDeviceStorage;
         typename PrunedPairCount::DeviceStorage sm_prunedPairCountDeviceStorage;
         // Extract the valid pointer to local storage
-#ifdef FLATTEN
-        sycl::local_ptr<float> sm_xq = Xq::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
+#ifdef SOA
+        sycl::local_ptr<float> sm_x = Xq_x::get_pointer(sm_xxHostStorage, sm_xqDeviceStorage);
+        sycl::local_ptr<float> sm_y = Xq_y::get_pointer(sm_xyHostStorage, sm_xqDeviceStorage);
+        sycl::local_ptr<float> sm_z = Xq_z::get_pointer(sm_xzHostStorage, sm_xqDeviceStorage);
+        sycl::local_ptr<float> sm_q = Xq_q::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
 #else
         sycl::local_ptr<Float4> sm_xq = Xq::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
 #endif
@@ -947,9 +991,12 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
                 xqi_q *= epsFac;
 
-                Float4 xqi = Float4(xqi_x, xqi_y, xqi_z, xqi_q);
+                /* Float4 xqi = Float4(xqi_x, xqi_y, xqi_z, xqi_q); */
 
-
+                sm_x[cacheIdx] = xqi_x;
+                sm_y[cacheIdx] = xqi_y;
+                sm_z[cacheIdx] = xqi_z;
+                sm_q[cacheIdx] = xqi_q;
 
 #else
                 const Float3 shift = gm_shiftVec[nbSci.shift];
@@ -957,9 +1004,11 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 Float4       xqi   = gm_xq[ai];
                 xqi += Float4(shift[0], shift[1], shift[2], 0.0F);
                 xqi[3] *= epsFac;
-#endif
 
                 sm_xq[cacheIdx] = xqi;
+#endif
+
+
 
 /* #ifdef DPCPP
                 if(bidx == 0){
@@ -1015,11 +1064,14 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                     // TODO: Are there other options?
                     if constexpr (props.elecEwald || props.elecRF || props.elecCutoff)
                     {
-#ifdef FLATTEN
-                        const float qi = sm_xq[(i * c_clSize + tidxi)+3];
+
+#ifdef SOA
+                        const float qi = sm_q[i * c_clSize + tidxi];
+
 #else
                         const float qi = sm_xq[i * c_clSize + tidxi][3];
 #endif
+
                         energyElec += qi * qi;
                     }
                     if constexpr (props.vdwEwald)
@@ -1118,11 +1170,22 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 const int cj     = *indexedAddress(gm_plistCJPacked[jPacked].cj, jm);
                 const int aj     = cj * c_clSize + tidxj;
 
+
+#ifdef SOA
+                const float xj = *indexedAddress(gm_xq_x, aj);
+                const float yj = *indexedAddress(gm_xq_y, aj);
+                const float zj = *indexedAddress(gm_xq_z, aj);
+                const float qj = *indexedAddress(gm_xq_q, aj);
+
+
+#else
                 // load j atom data
                 const Float4 xqj = *indexedAddress(gm_xq, aj);
-
                 const Float3 xj(xqj[0], xqj[1], xqj[2]);
                 const float  qj = xqj[3];
+
+#endif
+
                 int          atomTypeJ; // Only needed if (!props.vdwComb)
                 Float2       ljCombJ;   // Only needed if (props.vdwComb)
                 if constexpr (props.vdwComb)
@@ -1133,10 +1196,10 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 {
                     atomTypeJ = *indexedAddress(gm_atomTypes, aj);
                 }
-#ifdef FLATTEN
-                float f_x = 0.0F;
-                float f_y = 0.0F;
-                float f_z = 0.0F;
+#ifdef SOA
+                float fj_x = 0.0F;
+                float fj_y = 0.0F;
+                float fj_z = 0.0F;
 #else
                 Float3 fCjBuf(0.0F, 0.0F, 0.0F);
 #endif
@@ -1159,13 +1222,31 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                         // i cluster index
                         const int ci = sci * c_superClusterSize + i;
                         // all threads load an atom from i cluster ci into shmem!
+#ifdef SOA
+                        const float xi = sm_x[i * c_clSize + tidxi];
+                        const float yi = sm_y[i * c_clSize + tidxi];
+                        const float zi = sm_z[i * c_clSize + tidxi];
+
+                        const float rv_x = xi - xj;
+                        const float rv_y = yi - yj;
+                        const float rv_z = zi - zj;
+
+                        const float dist_x_sq = rv_x * rv_x;
+                        const float dist_y_sq = rv_y * rv_y;
+                        const float dist_z_sq = rv_z * rv_z;
+
+                        float r2 = dist_x_sq + dist_y_sq + dist_z_sq;
+
+
+
+#else
                         const Float4 xqi = sm_xq[i * c_clSize + tidxi];
                         const Float3 xi(xqi[0], xqi[1], xqi[2]);
 
                         // distance between i and j atoms
                         const Float3 rv = xi - xj;
                         float        r2 = norm2(rv);
-
+#endif
                         if constexpr (doPruneNBL)
                         {
 
@@ -1190,7 +1271,12 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                         if ((r2 < rCoulombSq) && notExcluded)
 #endif
                         {
+
+#ifdef SOA
+                            const float qi = sm_q[i * c_clSize + tidxi];
+#else
                             const float qi = xqi[3];
+#endif
                             int         atomTypeI; // Only needed if (!props.vdwComb)
                             float       sigma, epsilon;
                             Float2      c6c12;
@@ -1354,20 +1440,33 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             }
 #endif
 
-#ifdef ACCUMULATE_FORCES
+#ifdef SOA
+                            const float forceIJ_x = rv_x * fInvR;
+                            const float forceIJ_y = rv_y * fInvR;
+                            const float forceIJ_z = rv_z * fInvR;
+
+                            fj_x -= forceIJ_x;
+                            fj_y -= forceIJ_y;
+                            fj_z -= forceIJ_z;
+
+                            fCiBufX(i) += forceIJ_x;
+                            fCiBufY(i) += forceIJ_y;
+                            fCiBufZ(i) += forceIJ_z;
+
+#else
                             const Float3 forceIJ = rv * fInvR;
-                            //sycl::ext::oneapi::experimental::printf("%d\n",forceIJ[0]);
+
                             // accumulate j forces in registers
                             fCjBuf -= forceIJ;
                             // accumulate i forces in registers
-#if defined(__SYCL_DEVICE_ONLY__) && defined(__AMDGCN__)
-                            fCiBuf_[i] += FCiFloat3(forceIJ);
-#else
+
                             fCiBufX(i) += forceIJ[0];
                             fCiBufY(i) += forceIJ[1];
                             fCiBufZ(i) += forceIJ[2];
+
 #endif
-#endif
+
+
                         } // (r2 < rCoulombSq) && notExcluded
 #endif
                     } // (imask & maskJI)
@@ -1378,9 +1477,9 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 #endif
 #ifdef REDUCE_FORCE_J
                 // reduce j forces
-#ifdef FLATTEN
+#ifdef SOA
                 reduceForceJ<useShuffleReductionForceJ>(
-                        sm_reductionBuffer, f_x, f_y, f_z, itemIdx, tidxi, tidxj, aj, gm_f);
+                        sm_reductionBuffer, fj_x, fj_y, fj_z, itemIdx, tidxi, tidxj, aj, gm_fx, gm_fy, gm_fz, gm_f);
 #else
 
                 reduceForceJ<useShuffleReductionForceJ>(
@@ -1405,7 +1504,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
 #ifdef REDUCE_I
         reduceForceIAndFShift<useShuffleReductionForceI, subGroupSize>(
-                sm_reductionBuffer, fCiBufX, fCiBufY, fCiBufZ, doCalcShift, itemIdx, tidxi, tidxj, sci, nbSci.shift, gm_f, gm_fShift);
+                sm_reductionBuffer, fCiBufX, fCiBufY, fCiBufZ, doCalcShift, itemIdx, tidxi, tidxj, sci, nbSci.shift, gm_fx, gm_fy, gm_fz, gm_f, gm_fShift);
 #endif
 
 #ifdef GROUP_REDUCE
@@ -1517,6 +1616,11 @@ void launchNbnxmKernelHelper(NbnxmGpu* nb, const gmx::StepWorkload& stepWork, co
             adat->xq_q.get_pointer(),
             //
             adat->f.get_pointer(),
+            //
+            adat->fx.get_pointer(),
+            adat->fy.get_pointer(),
+            adat->fz.get_pointer(),
+            //
             adat->shiftVec.get_pointer(),
             // ShiftVec SoA
             adat->shiftVec_x.get_pointer(),

@@ -116,6 +116,9 @@ void nbnxn_atomdata_t::resizeForceBuffers()
     for (nbnxn_atomdata_output_t& outputBuffer : outputBuffers_)
     {
         outputBuffer.f.resize(paddedSize * fstride);
+        outputBuffer.fx.resize(paddedSize);
+        outputBuffer.fy.resize(paddedSize);
+        outputBuffer.fz.resize(paddedSize);
     }
 }
 
@@ -124,6 +127,11 @@ nbnxn_atomdata_output_t::nbnxn_atomdata_output_t(NbnxmKernelType kernelType,
                                                  int             numEnergyGroups,
                                                  PinningPolicy   pinningPolicy) :
     f({}, { pinningPolicy }),
+
+    fx({}, { pinningPolicy}),
+    fy({}, { pinningPolicy}),
+    fz({}, { pinningPolicy}),
+
     fshift({}, { pinningPolicy }),
     Vvdw({}, { pinningPolicy }),
     Vc({}, { pinningPolicy })
@@ -1747,10 +1755,19 @@ void nbnxn_atomdata_t::clearForceBuffer(const int outputIndex)
         GMX_ASSERT(fstride == DIM, "Only fstride=3 is currently handled here");
 
         clearBufferFlagged<DIM>(outputIndex, bufferFlags_, outputBuffers_[outputIndex].f);
+
+
+        clearBufferFlagged<DIM>(outputIndex, bufferFlags_, outputBuffers_[outputIndex].fx);
+        clearBufferFlagged<DIM>(outputIndex, bufferFlags_, outputBuffers_[outputIndex].fy);
+        clearBufferFlagged<DIM>(outputIndex, bufferFlags_, outputBuffers_[outputIndex].fz);
     }
     else
     {
         clearBufferAll(outputBuffers_[outputIndex].f);
+
+        clearBufferAll(outputBuffers_[outputIndex].fx);
+        clearBufferAll(outputBuffers_[outputIndex].fy);
+        clearBufferAll(outputBuffers_[outputIndex].fz);
     }
 }
 
