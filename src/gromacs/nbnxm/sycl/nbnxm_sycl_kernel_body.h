@@ -108,7 +108,8 @@ using FCiFloat3 = Float3;
  */
 constexpr bool c_avoidFloatingPointAtomics(PairlistType layoutType)
 {
-    return (sc_gpuClusterSize(layoutType) == 4);
+    //return (sc_gpuClusterSize(layoutType) == 4);
+    return false;
 }
 
 using sycl::access::fence_space;
@@ -203,9 +204,13 @@ static inline void reduceForceJShuffle(Float3                   f,
 
     if(tidxi == 0){
         atomicFetchAdd(a_fx[aidx], f_x);
-    }else if(tidxi == 1){
+    }
+    sycl::group_barrier(itemIdx.get_sub_group());
+    if(tidxi == 1){
         atomicFetchAdd(a_fy[aidx], f_x);
-    }else if(tidxi == 2){
+    }
+    sycl::group_barrier(itemIdx.get_sub_group());
+    if(tidxi == 2){
         atomicFetchAdd(a_fz[aidx], f_x);
     }
 
@@ -393,6 +398,7 @@ static inline void reduceForceIAndFShiftGeneric(sycl::local_ptr<float>   sm_buf,
     static constexpr int clSizeLog2         = gmx::StaticLog2<c_clSize>::value;
     const int            tidx               = tidxi + tidxj * c_clSize;
     float                fShiftBuf          = 0.0F;
+
 #pragma unroll c_superClusterSize
     for (int ciOffset = 0; ciOffset < c_superClusterSize; ciOffset++)
     {
@@ -512,7 +518,7 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
     constexpr int threadBitMask = (1U << numShuffleReductionSteps) - 1;
 
 
-    /* sycl::ext::oneapi::experimental::printf("numShuffleSteps: %d\tthreadbitMask: %d\n", numShuffleReductionSteps, threadBitMask); */
+   /*  sycl::ext::oneapi::experimental::printf("numShuffleSteps: %d\tthreadbitMask: %d\n", numShuffleReductionSteps, threadBitMask); */
 
 //#    pragma unroll c_superClusterSize
     #pragma clang loop unroll(disable)
@@ -546,7 +552,19 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
 
 #ifdef SOA
 
-        //int cond = tidxj & threadBitMask;
+#ifdef NB4
+        if((tidxj == 0)){
+            atomicFetchAdd(a_fx[aidx], fx);
+        }
+
+        else if((tidxj == 1)){
+            atomicFetchAdd(a_fy[aidx], fx);
+        }
+
+        if((tidxj == 2)){
+            atomicFetchAdd(a_fz[aidx], fx);
+        }
+#else
 
         if((tidxj == 0) || (tidxj == 4)){
             atomicFetchAdd(a_fx[aidx], fx);
@@ -559,7 +577,7 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
         if((tidxj == 2) || (tidxj == 6)){
             atomicFetchAdd(a_fz[aidx], fx);
         }
-
+#endif
 
 
         if((tidxj & threadBitMask) < 3){
@@ -568,27 +586,6 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
                 fShiftBuf += fx;
             }
         }
-
-
-        /* if((tidxj & threadBitMask) < 3){
-            if((tidxj & threadBitMask) == 0){
-                atomicFetchAdd(a_fx[aidx], fx);
-            }else if((tidxj & threadBitMask) == 1){
-                atomicFetchAdd(a_fy[aidx], fx);
-
-            }else if((tidxj & threadBitMask) == 2){
-            //}else{
-                atomicFetchAdd(a_fz[aidx], fx);
-            }
-
-
-            if (calcFShift)
-            {
-                fShiftBuf += fx;
-            }
-
-        } */
-
 #else
 
 
@@ -642,6 +639,9 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
         const int                tidxj,
         const int                sci,
         const int                shift,
+        sycl::global_ptr<float> a_fx,
+        sycl::global_ptr<float> a_fy,
+        sycl::global_ptr<float> a_fz,
         sycl::global_ptr<Float3> a_f,
         sycl::global_ptr<Float3> a_fShift)
 {
@@ -654,7 +654,13 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
                 && "One-step shuffle reduction inefficient, use two-step version");
     float fShiftBufXY = 0.0F;
     float fShiftBufZ  = 0.0F;
-#pragma unroll c_superClusterSize
+
+
+
+    /* sycl::ext::oneapi::experimental::printf("Single step reduction\n"); */
+
+//#pragma unroll c_superClusterSize
+    #pragma clang loop unroll(disable)
     for (int ciOffset = 0; ciOffset < c_superClusterSize; ciOffset++)
     {
         const int aidx = (sci * c_superClusterSize + ciOffset) * c_clSize + tidxi;
@@ -671,6 +677,29 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
         }
         // Can not use shuffles to reduce further, do global atomics
         // Add the current X and Y values to the global buffer
+#ifdef SOA
+        if((tidxj == 0) || (tidxj == 2)){
+            atomicFetchAdd(a_fx[aidx], fx);
+        }
+        sycl::group_barrier(itemIdx.get_sub_group());
+        if((tidxj == 1) || (tidxj == 3)){
+            atomicFetchAdd(a_fy[aidx], fx);
+        }
+
+        if(calcFShift){
+            fShiftBufXY += fx;
+        }
+
+        if((tidxj == 0) || (tidxj == 2)){
+            atomicFetchAdd(a_fz[aidx], fz);
+
+            if (calcFShift)
+            {
+                fShiftBufZ += fz;
+            }
+        }
+
+#else
         atomicFetchAdd(a_f[aidx][(tidxj & 1)], fx);
         if (calcFShift)
         {
@@ -685,6 +714,8 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
                 fShiftBufZ += fz;
             }
         }
+
+#endif
         sycl::group_barrier(itemIdx.get_sub_group());
     }
     /* add up local shift forces into global mem */
@@ -724,6 +755,7 @@ static inline void reduceForceIAndFShift(sycl::local_ptr<float>   sm_buf,
                                          sycl::global_ptr<Float3> a_f,
                                          sycl::global_ptr<Float3> a_fShift)
 {
+
     // must have power of two elements in fCiBuf
     static_assert(gmx::isPowerOfTwo(sc_gpuClusterPerSuperCluster(sc_layoutType)));
     constexpr int c_clSize = sc_gpuClusterSize(sc_layoutType);
@@ -820,10 +852,13 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
      * it causes up to 20x slowdown compared to generic, local memory-based reduction. */
     constexpr bool useShuffleReductionForceI =
             (numReductionSteps <= 3) && (c_clSize == 8 || c_clSize == 4)
-            && !(numReductionSteps == 1 && c_avoidFloatingPointAtomics);
+            && !(numReductionSteps == 1 && c_avoidFloatingPointAtomics(sc_layoutType));
+            //&& !(numReductionSteps == 1 && false);
     constexpr bool useShuffleReductionForceJ = gmx::isPowerOfTwo(c_superClusterSize);
 
+
     // Local memory buffer for i x+q pre-loading
+
 
 #ifdef SOA
     using Xq_x = StaticLocalStorage<float, c_superClusterSize * c_clSize>;
@@ -914,13 +949,16 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         const unsigned tidxj = tidx / c_clSize;
 #else
         /* thread/block/warp id-s */
-        const unsigned tidxi = itemIdx.get_local_id(2);
+        /* const unsigned tidxi = itemIdx.get_local_id(2);
         const unsigned tidxj = itemIdx.get_local_id(1);
-        const unsigned tidx  = tidxj * c_clSize + tidxi;
+        const unsigned tidx  = tidxj * c_clSize + tidxi; */
 
-        /* const unsigned tidx = itemIdx.get_local_linear_id();
-        const unsigned tidxi = tidx % 8;
+
+        const unsigned tidx = itemIdx.get_local_linear_id();
+        /* const unsigned tidxi = tidx % 8;
         const unsigned tidxj = tidx / 8; */
+        const unsigned tidxi = tidx % 4;
+        const unsigned tidxj = tidx / 4;
 
 #endif
 
@@ -1561,7 +1599,7 @@ static void launchNbnxmKernel(const DeviceStream& deviceStream, const int numSci
     // Linear Conversion:
     const sycl::range<3>    blockSize{ 1, 1, c_clSize * c_clSize };
 #else
-    const sycl::range<3>    blockSize{ 1, c_clSize, c_clSize };
+    const sycl::range<3>    blockSize{ 1, c_clSize/2, c_clSize*2 };
 
 
     //const sycl::range<3>    blockSize{ 1, 2, 8 };
