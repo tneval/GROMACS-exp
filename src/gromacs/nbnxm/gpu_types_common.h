@@ -152,6 +152,10 @@ struct NBStagingData
     //! shift forces
     HostVector<Float3> fShift;
 
+    HostVector<float> fShiftX;
+    HostVector<float> fShiftY;
+    HostVector<float> fShiftZ;
+
     //! foreign lambda terms
     HostVector<float> eLJForeign;
     HostVector<float> eElecForeign;
@@ -210,6 +214,10 @@ struct NBAtomDataGpu
 
     //! shift forces
     DeviceBuffer<Float3> fShift;
+
+    DeviceBuffer<float> fShiftX;
+    DeviceBuffer<float> fShiftY;
+    DeviceBuffer<float> fShiftZ;
 
     //! number of atom types
     int numTypes;

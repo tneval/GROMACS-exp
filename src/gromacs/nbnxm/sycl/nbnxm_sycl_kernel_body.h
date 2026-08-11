@@ -56,7 +56,7 @@
 
 
 #define MAIN_LOOP
-#define REDUCE_I
+//#define REDUCE_I
 #define REDUCE_FORCE_J
 #define GROUP_REDUCE
 #define INNER_FOR
@@ -66,6 +66,9 @@
 #define DO_CALC_ENERGIES
 #define ELEC_CUTOFF
 
+
+// Innermost loop conditionals
+//#define FIRST_INNER_CONDITIONAL
 
 
 //#define FLATTENED_GRID
@@ -500,6 +503,9 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
         sycl::global_ptr<float> a_fy,
         sycl::global_ptr<float> a_fz,
         sycl::global_ptr<Float3> a_f,
+        sycl::global_ptr<float> a_fShiftX,
+        sycl::global_ptr<float> a_fShiftY,
+        sycl::global_ptr<float> a_fShiftZ,
         sycl::global_ptr<Float3> a_fShift)
 {
     constexpr int         c_superClusterSize = sc_gpuClusterPerSuperCluster(sc_layoutType);
@@ -643,6 +649,9 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
         sycl::global_ptr<float> a_fy,
         sycl::global_ptr<float> a_fz,
         sycl::global_ptr<Float3> a_f,
+        sycl::global_ptr<float> a_fShiftX,
+        sycl::global_ptr<float> a_fShiftY,
+        sycl::global_ptr<float> a_fShiftZ,
         sycl::global_ptr<Float3> a_fShift)
 {
     constexpr int         c_superClusterSize = sc_gpuClusterPerSuperCluster(sc_layoutType);
@@ -721,12 +730,25 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
     /* add up local shift forces into global mem */
     if (calcFShift)
     {
+
+#ifdef SOA
+        if((tidxj == 0) || (tidxj == 2)){
+            atomicFetchAdd(a_fShiftX[shift], fShiftBufXY);
+
+            atomicFetchAdd(a_fShiftZ[shift], fShiftBufZ);
+        }
+
+        if((tidxj == 1) || (tidxj == 3)){
+            atomicFetchAdd(a_fShiftY[shift], fShiftBufXY);
+        }
+#else
         // Update X and Y by even and odd threads, respectively
         atomicFetchAdd(a_fShift[shift][tidxj & 1], fShiftBufXY);
         if ((tidxj & 1) == 0)
         {
             atomicFetchAdd(a_fShift[shift][2], fShiftBufZ);
         }
+#endif
     }
 }
 
@@ -753,6 +775,9 @@ static inline void reduceForceIAndFShift(sycl::local_ptr<float>   sm_buf,
                                          sycl::global_ptr<float> a_fy,
                                          sycl::global_ptr<float> a_fz,
                                          sycl::global_ptr<Float3> a_f,
+                                         sycl::global_ptr<float> a_fShiftX,
+                                         sycl::global_ptr<float> a_fShiftY,
+                                         sycl::global_ptr<float> a_fShiftZ,
                                          sycl::global_ptr<Float3> a_fShift)
 {
 
@@ -765,7 +790,7 @@ static inline void reduceForceIAndFShift(sycl::local_ptr<float>   sm_buf,
         static_assert(numSteps > 0 && numSteps <= 3,
                       "Invalid combination of sub-group size and cluster size");
         reduceForceIAndFShiftShuffles<numSteps>(
-                fCiBufX, fCiBufY, fCiBufZ, calcFShift, itemIdx, tidxi, tidxj, sci, shift, a_fx, a_fy, a_fz, a_f, a_fShift);
+                fCiBufX, fCiBufY, fCiBufZ, calcFShift, itemIdx, tidxi, tidxj, sci, shift, a_fx, a_fy, a_fz, a_f, a_fShiftX, a_fShiftY, a_fShiftZ, a_fShift);
     }
     else
     {
@@ -796,6 +821,10 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                         const float* __restrict__ gm_shiftVec_z,
                         //
                         Float3* __restrict__ gm_fShift,
+                        float* __restrict__ gm_fShiftX,
+                        float* __restrict__ gm_fShiftY,
+                        float* __restrict__ gm_fShiftZ,
+                        //
                         float* __restrict__ gm_energyElec,
                         float* __restrict__ gm_energyVdw,
                         nbnxn_cj_packed_t* __restrict__ gm_plistCJPacked,
@@ -1012,15 +1041,20 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
 #ifdef SOA
 
+
                 float shift_x = gm_shiftVec_x[nbSci.shift];
                 float shift_y = gm_shiftVec_y[nbSci.shift];
                 float shift_z = gm_shiftVec_z[nbSci.shift];
 
                 //
-                float xqi_x = gm_xq_x[ai];
+                /* float xqi_x = gm_xq_x[ai];
                 float xqi_y = gm_xq_y[ai];
                 float xqi_z = gm_xq_z[ai];
-                float xqi_q = gm_xq_q[ai];
+                float xqi_q = gm_xq_q[ai]; */
+                float xqi_x = gm_xq_x[tidx];
+                float xqi_y = gm_xq_y[tidx];
+                float xqi_z = gm_xq_z[tidx];
+                float xqi_q = gm_xq_q[tidx];
 
 
                 xqi_x += shift_x;
@@ -1047,14 +1081,6 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 #endif
 
 
-
-/* #ifdef DPCPP
-                if(bidx == 0){
-                    sycl::ext::oneapi::experimental::printf("(%d,%d): i:%d\tc_clSize = %d\tc_superClusterSize = %d\tsci = %d\tci = %d\tai = %d\tcacheIdx = %d\t\n", tidxi, tidxj, i, c_clSize, c_superClusterSize, sci, ci, ai, cacheIdx);
-                }
-#endif */
-
-
                 if constexpr (!props.vdwComb)
                 {
                     // Pre-load the i-atom types into shared memory
@@ -1065,6 +1091,14 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                     // Pre-load the LJ combination parameters into shared memory4
                     sm_ljCombI[cacheIdx] = gm_ljComb[ai];
                 }
+
+
+
+                // To not dead-code eliminate
+                itemIdx.barrier(fence_space::local_space);
+                float sum = xqi_x + xqi_y + xqi_z + xqi_q;
+                gm_fx[0] += sum;
+
             }
         }
 
@@ -1097,6 +1131,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 && gm_plistCJPacked[cijPackedBegin].cj[0] == sci * c_superClusterSize)
             {
                 // we have the diagonal: add the charge and LJ self interaction energy term
+                #pragma clang loop unroll(disable)
                 for (int i = 0; i < c_superClusterSize; i++)
                 {
                     // TODO: Are there other options?
@@ -1143,6 +1178,8 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         // Note that we use & instead of && for performance (benchmarked in 2017)
         const bool nonSelfInteraction = !(nbSci.shift == gmx::c_centralShiftIndex & tidxj <= tidxi);
 
+        gm_fx[0] += energyElec;
+        gm_fx[0] += energyVdw;
 
 
         // loop over the j clusters = seen by any of the atoms in the current super-cluster
@@ -1150,13 +1187,6 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         #pragma clang loop unroll(disable)
         for (int jPacked = cijPackedBegin; jPacked < cijPackedEnd; jPacked += 1)
         {
-#ifdef DPCPP
-            if(bidx == 0 && tidx == 0){
-                sycl::ext::oneapi::experimental::printf("cijPackedBegin: %d\tcijPackedEnd: %d\n",cijPackedBegin, cijPackedEnd);
-            }
-#endif
-
-
             nbnxn_cj_packed_t* plistCJPacked = indexedAddress(gm_plistCJPacked, jPacked);
             unsigned imask = UNIFORM_LOAD_CLUSTER_PAIR_DATA(plistCJPacked->imei[imeiIdx].imask);
             if (!doPruneNBL && !imask)
@@ -1169,33 +1199,11 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
             const unsigned wexcl =
                     (*indexedAddress(gm_plistExcl, wexclIdx)).pair[tidx & (prunedClusterPairSize - 1)];
             // Unrolling has been verified to improve performance on AMD and Nvidia
-#if defined(__AMDGCN__)
-            constexpr int unrollFactor =
-                    c_nbnxnGpuJgroupSize; // Unrolling has been verified to improve performance on AMD
-#elif defined(__SYCL_CUDA_ARCH__) && __SYCL_CUDA_ARCH__ >= 800
-            // Unrolling parameters follow CUDA implementation for Ampere and later.
-            constexpr int unrollFactor = [=]()
-            {
-                if constexpr (!doCalcEnergies && !doPruneNBL)
-                {
-                    return (props.elecCutoff || props.elecRF
-                            || (props.elecEwald && !props.vdwFSwitch && !props.vdwPSwitch
-                                && (props.vdwCombLB || __SYCL_CUDA_ARCH__ == 800)))
-                                   ? 4
-                                   : 2;
-                }
-                else
-                {
-                    return (props.elecCutoff || (props.elecRF && !props.vdwFSwitch && !props.vdwPSwitch))
-                                   ? 2
-                                   : 1;
-                }
-            }();
-#else
+
             constexpr int unrollFactor = 1; // No unrolling.
-#endif
 
 //#pragma unroll unrollFactor
+// MID-LOOP:
             #pragma clang loop unroll(disable)
             for (int jm = 0; jm < c_nbnxnGpuJgroupSize; jm++)
             {
@@ -1299,16 +1307,13 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
                         const bool notExcluded = doExclusionForces ? (nonSelfInteraction | (ci != cj))
                                                                    : (wexcl & maskJI);
-
+                        //gm_fx[0] += r2;
 #ifdef INNERMOST_IF
 
-#if defined(__SYCL_CUDA_ARCH__)
-
-                        if ((r2 < rCoulombSq) * notExcluded)
-#else // Intel and AMD paths
+#ifdef FIRST_INNER_CONDITIONAL
                         if ((r2 < rCoulombSq) && notExcluded)
-#endif
                         {
+#endif
 
 #ifdef SOA
                             const float qi = sm_q[i * c_clSize + tidxi];
@@ -1346,8 +1351,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             } // !props.vdwComb
 
                             // c6 and c12 are unused and garbage iff props.vdwCombLB && !doCalcEnergies
-                            const float c6  = c6c12[0];
-                            const float c12 = c6c12[1];
+
 
                             // Ensure distance do not become so small that r^-12 overflows
                             r2 = sycl::max(r2, c_nbnxnMinDistanceSquared);
@@ -1504,8 +1508,9 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
 #endif
 
-
+#ifdef FIRST_INNER_CONDITIONAL
                         } // (r2 < rCoulombSq) && notExcluded
+#endif
 #endif
                     } // (imask & maskJI)
 #endif
@@ -1542,7 +1547,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
 #ifdef REDUCE_I
         reduceForceIAndFShift<useShuffleReductionForceI, subGroupSize>(
-                sm_reductionBuffer, fCiBufX, fCiBufY, fCiBufZ, doCalcShift, itemIdx, tidxi, tidxj, sci, nbSci.shift, gm_fx, gm_fy, gm_fz, gm_f, gm_fShift);
+                sm_reductionBuffer, fCiBufX, fCiBufY, fCiBufZ, doCalcShift, itemIdx, tidxi, tidxj, sci, nbSci.shift, gm_fx, gm_fy, gm_fz, gm_f, gm_fShiftX, gm_fShiftY, gm_fShiftZ, gm_fShift);
 #endif
 
 #ifdef GROUP_REDUCE
@@ -1572,7 +1577,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
             prunedPairCount = sm_prunedPairCount[0];
             if (tidxi == 0 && tidxj == 0)
             {
-                /* one thread in the block writes the final count for this sci */
+                // one thread in the block writes the final count for this sci
                 int index = sycl::max(c_sciHistogramSize - prunedPairCount - 1, 0);
                 atomicFetchAdd(gm_sciHistogram[index], 1);
                 gm_sciCount[bidx] = index;
@@ -1641,7 +1646,8 @@ void launchNbnxmKernelHelper(NbnxmGpu* nb, const gmx::StepWorkload& stepWork, co
     GMX_ASSERT(doCalcEnergies == stepWork.computeEnergy, "Wrong template called");
 
 
-    chooseAndLaunchNbnxmKernel<subGroupSize, doPruneNBL, doCalcEnergies>(
+    /* chooseAndLaunchNbnxmKernel<subGroupSize, doPruneNBL, doCalcEnergies>( */
+    chooseAndLaunchNbnxmKernel<subGroupSize, true, true>(
             nbp->elecType,
             nbp->vdwType,
             deviceStream,
@@ -1666,6 +1672,10 @@ void launchNbnxmKernelHelper(NbnxmGpu* nb, const gmx::StepWorkload& stepWork, co
             adat->shiftVec_z.get_pointer(),
             //
             adat->fShift.get_pointer(),
+            adat->fShiftX.get_pointer(),
+            adat->fShiftY.get_pointer(),
+            adat->fShiftZ.get_pointer(),
+            //
             adat->eElec.get_pointer(),
             adat->eLJ.get_pointer(),
             plist->cjPacked.get_pointer(),

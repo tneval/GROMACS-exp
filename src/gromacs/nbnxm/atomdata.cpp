@@ -133,10 +133,18 @@ nbnxn_atomdata_output_t::nbnxn_atomdata_output_t(NbnxmKernelType kernelType,
     fz({}, { pinningPolicy}),
 
     fshift({}, { pinningPolicy }),
+    fshiftX({}, { pinningPolicy }),
+    fshiftY({}, { pinningPolicy }),
+    fshiftZ({}, { pinningPolicy }),
     Vvdw({}, { pinningPolicy }),
     Vc({}, { pinningPolicy })
 {
     fshift.resize(c_numShiftVectors * DIM);
+
+    fshiftX.resize(c_numShiftVectors);
+    fshiftY.resize(c_numShiftVectors);
+    fshiftZ.resize(c_numShiftVectors);
+
     Vvdw.resize(numEnergyGroups * numEnergyGroups);
     Vc.resize(numEnergyGroups * numEnergyGroups);
 

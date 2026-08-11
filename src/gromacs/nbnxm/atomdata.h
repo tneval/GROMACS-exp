@@ -132,6 +132,11 @@ struct nbnxn_atomdata_output_t
 
     //! Shift force array, size c_numShiftVectors*DIM
     HostVector<real> fshift;
+
+    HostVector<real> fshiftX;
+    HostVector<real> fshiftY;
+    HostVector<real> fshiftZ;
+
     //! Temporary Van der Waals group energy storage
     HostVector<real> Vvdw;
     //! Temporary Coulomb group energy storage

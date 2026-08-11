@@ -332,12 +332,20 @@ static inline void initAtomdataFirst(NBAtomDataGpu*           atomdata,
     atomdata->shiftVecUploaded = false;
 
     allocateDeviceBuffer(&atomdata->fShift, c_numShiftVectors, deviceContext);
+    allocateDeviceBuffer(&atomdata->fShiftX, c_numShiftVectors, deviceContext);
+    allocateDeviceBuffer(&atomdata->fShiftY, c_numShiftVectors, deviceContext);
+    allocateDeviceBuffer(&atomdata->fShiftZ, c_numShiftVectors, deviceContext);
+
+
     allocateDeviceBuffer(&atomdata->eLJ, 1, deviceContext);
     allocateDeviceBuffer(&atomdata->eElec, 1, deviceContext);
     allocateDeviceBuffer(&atomdata->dvdlLJ, 1, deviceContext);
     allocateDeviceBuffer(&atomdata->dvdlElec, 1, deviceContext);
 
     clearDeviceBufferAsync(&atomdata->fShift, 0, c_numShiftVectors, localStream);
+    clearDeviceBufferAsync(&atomdata->fShiftX, 0, c_numShiftVectors, localStream);
+    clearDeviceBufferAsync(&atomdata->fShiftY, 0, c_numShiftVectors, localStream);
+    clearDeviceBufferAsync(&atomdata->fShiftZ, 0, c_numShiftVectors, localStream);
     clearDeviceBufferAsync(&atomdata->eElec, 0, 1, localStream);
     clearDeviceBufferAsync(&atomdata->eLJ, 0, 1, localStream);
     clearDeviceBufferAsync(&atomdata->dvdlElec, 0, 1, localStream);
@@ -643,12 +651,18 @@ NbnxmGpu* gpu_init(const DeviceStreamManager& deviceStreamManager,
     changePinningPolicy(&nb->nbst.eLJ, PinningPolicy::PinnedIfSupported);
     changePinningPolicy(&nb->nbst.eElec, PinningPolicy::PinnedIfSupported);
     changePinningPolicy(&nb->nbst.fShift, PinningPolicy::PinnedIfSupported);
+    changePinningPolicy(&nb->nbst.fShiftX, PinningPolicy::PinnedIfSupported);
+    changePinningPolicy(&nb->nbst.fShiftY, PinningPolicy::PinnedIfSupported);
+    changePinningPolicy(&nb->nbst.fShiftZ, PinningPolicy::PinnedIfSupported);
     changePinningPolicy(&nb->nbst.dvdlLJ, PinningPolicy::PinnedIfSupported);
     changePinningPolicy(&nb->nbst.dvdlElec, PinningPolicy::PinnedIfSupported);
 
     nb->nbst.eLJ.resize(1);
     nb->nbst.eElec.resize(1);
     nb->nbst.fShift.resize(c_numShiftVectors);
+    nb->nbst.fShiftX.resize(c_numShiftVectors);
+    nb->nbst.fShiftY.resize(c_numShiftVectors);
+    nb->nbst.fShiftZ.resize(c_numShiftVectors);
     nb->nbst.dvdlLJ.resize(1);
     nb->nbst.dvdlElec.resize(1);
 
@@ -1285,6 +1299,9 @@ void gpu_clear_outputs(NbnxmGpu* nb, bool computeVirial)
     if (computeVirial)
     {
         clearDeviceBufferAsync(&adat->fShift, 0, c_numShiftVectors, localStream);
+        clearDeviceBufferAsync(&adat->fShiftX, 0, c_numShiftVectors, localStream);
+        clearDeviceBufferAsync(&adat->fShiftY, 0, c_numShiftVectors, localStream);
+        clearDeviceBufferAsync(&adat->fShiftZ, 0, c_numShiftVectors, localStream);
         clearDeviceBufferAsync(&adat->eLJ, 0, 1, localStream);
         clearDeviceBufferAsync(&adat->eElec, 0, 1, localStream);
         clearDeviceBufferAsync(&adat->dvdlLJ, 0, 1, localStream);
@@ -1481,13 +1498,48 @@ void gpu_launch_cpyback(NbnxmGpu*                nb,
             static_assert(
                     sizeof(*nb->nbst.fShift.data()) == sizeof(Float3),
                     "Sizes of host- and device-side shift vector elements should be the same.");
-            copyFromDeviceBuffer(nb->nbst.fShift.data(),
+           /*  copyFromDeviceBuffer(nb->nbst.fShift.data(),
                                  &adat->fShift,
                                  0,
                                  c_numShiftVectors,
                                  deviceStream,
-                                 GpuApiCallBehavior::Async,
+                                 GpuApiCallBehavior::Sync,
+                                 bDoTime ? timers->xf[atomLocality].nb_d2h.fetchNextEvent() : nullptr); */
+
+            copyFromDeviceBuffer(nb->nbst.fShiftX.data(),
+                                 &adat->fShiftX,
+                                 0,
+                                 c_numShiftVectors,
+                                 deviceStream,
+                                 GpuApiCallBehavior::Sync,
                                  bDoTime ? timers->xf[atomLocality].nb_d2h.fetchNextEvent() : nullptr);
+
+            copyFromDeviceBuffer(nb->nbst.fShiftY.data(),
+                                 &adat->fShiftY,
+                                 0,
+                                 c_numShiftVectors,
+                                 deviceStream,
+                                 GpuApiCallBehavior::Sync,
+                                 bDoTime ? timers->xf[atomLocality].nb_d2h.fetchNextEvent() : nullptr);
+
+            copyFromDeviceBuffer(nb->nbst.fShiftZ.data(),
+                                 &adat->fShiftZ,
+                                 0,
+                                 c_numShiftVectors,
+                                 deviceStream,
+                                 GpuApiCallBehavior::Sync,
+                                 bDoTime ? timers->xf[atomLocality].nb_d2h.fetchNextEvent() : nullptr);
+
+
+            for(int i = 0; i< c_numShiftVectors; i++){
+                nb->nbst.fShift.data()[i][0] = nb->nbst.fShiftX.data()[i];
+                nb->nbst.fShift.data()[i][1] = nb->nbst.fShiftY.data()[i];
+                nb->nbst.fShift.data()[i][2] = nb->nbst.fShiftZ.data()[i];
+               /*  printf("i: %d\t (%f\t%f\t%f)\n", i, nb->nbst.fShift.data()[i][0], nb->nbst.fShift.data()[i][1], nb->nbst.fShift.data()[i][2]);
+                printf("i: %d\t (%f\t%f\t%f)\n", i, nb->nbst.fShiftX.data()[i], nb->nbst.fShiftY.data()[i], nb->nbst.fShiftZ.data()[i]); */
+            }
+
+
         }
 
         /* DtoH energies */
@@ -1891,6 +1943,9 @@ void gpu_free(NbnxmGpu* nb)
     freeDeviceBuffer(&(nb->atdat->dvdlLJ));
     freeDeviceBuffer(&(nb->atdat->dvdlElec));
     freeDeviceBuffer(&(nb->atdat->fShift));
+    freeDeviceBuffer(&(nb->atdat->fShiftX));
+    freeDeviceBuffer(&(nb->atdat->fShiftY));
+    freeDeviceBuffer(&(nb->atdat->fShiftZ));
     freeDeviceBuffer(&(nb->atdat->shiftVec));
 
     if (nbparam->bFepGpuNonBonded)
