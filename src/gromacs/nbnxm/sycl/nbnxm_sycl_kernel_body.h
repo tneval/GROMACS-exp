@@ -1302,13 +1302,13 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
 #ifdef INNERMOST_IF
 
-#if defined(__SYCL_CUDA_ARCH__)
+/* #if defined(__SYCL_CUDA_ARCH__)
 
                         if ((r2 < rCoulombSq) * notExcluded)
 #else // Intel and AMD paths
                         if ((r2 < rCoulombSq) && notExcluded)
 #endif
-                        {
+                        { */
 
 #ifdef SOA
                             const float qi = sm_q[i * c_clSize + tidxi];
@@ -1318,6 +1318,9 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             int         atomTypeI; // Only needed if (!props.vdwComb)
                             float       sigma, epsilon;
                             Float2      c6c12;
+
+                            float tmpElec = 0;
+                            float tmpVdw = 0;
 
                             if constexpr (!props.vdwComb)
                             {
@@ -1425,7 +1428,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             }
                             if constexpr (doCalcEnergies)
                             {
-                                energyVdw += energyLJPair;
+                                tmpVdw += energyLJPair;
                             }
 #ifdef ELEC_CUTOFF
                             if constexpr (props.elecCutoff)
@@ -1462,16 +1465,16 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             {
                                 if constexpr (props.elecCutoff)
                                 {
-                                    energyElec += qi * qj * (pairExclMask * rInv - cRF);
+                                    tmpElec += qi * qj * (pairExclMask * rInv - cRF);
                                 }
                                 if constexpr (props.elecRF)
                                 {
-                                    energyElec +=
+                                    tmpElec +=
                                             qi * qj * (pairExclMask * rInv + 0.5F * twoKRf * r2 - cRF);
                                 }
                                 if constexpr (props.elecEwald)
                                 {
-                                    energyElec += qi * qj
+                                    tmpElec += qi * qj
                                                   * (rInv * (pairExclMask - sycl::erf(r2 * rInv * ewaldBeta))
                                                      - pairExclMask * ewaldShift);
                                 }
@@ -1483,13 +1486,13 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             const float forceIJ_y = rv_y * fInvR;
                             const float forceIJ_z = rv_z * fInvR;
 
-                            fj_x -= forceIJ_x;
+                            /* fj_x -= forceIJ_x;
                             fj_y -= forceIJ_y;
                             fj_z -= forceIJ_z;
 
                             fCiBufX(i) += forceIJ_x;
                             fCiBufY(i) += forceIJ_y;
-                            fCiBufZ(i) += forceIJ_z;
+                            fCiBufZ(i) += forceIJ_z; */
 
 #else
                             const Float3 forceIJ = rv * fInvR;
@@ -1504,8 +1507,40 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
 #endif
 
+                        float mask = ((r2 < rCoulombSq) && notExcluded) ? 1 : 0;
 
-                        } // (r2 < rCoulombSq) && notExcluded
+                        if constexpr (doCalcEnergies)
+                        {
+                            energyVdw += tmpVdw * mask;
+                            energyElec += tmpElec * mask;
+                        }
+
+
+                        fj_x -= forceIJ_x * mask;
+                        fj_y -= forceIJ_y * mask;
+                        fj_z -= forceIJ_z * mask;
+
+                        fCiBufX(i) += forceIJ_x * mask;
+                        //float reduced_x = sycl::reduce_over_group(sg, forceIJ_x * mask, sycl::plus<float>());
+
+                        fCiBufY(i) += forceIJ_y * mask;
+                        //float reduced_y = sycl::reduce_over_group(sg, forceIJ_y * mask, sycl::plus<float>());
+
+                        fCiBufZ(i) += forceIJ_z * mask;
+                        //float reduced_z = sycl::reduce_over_group(sg, forceIJ_z * mask, sycl::plus<float>());
+
+
+                        // Note that this only applies in case there is one sg per lane.
+                        // Otherwise check if sg_local_id == 0 or something
+                        /* if(tidxi == 0){
+                            sm_fci_x[i] += reduced_x;
+                            sm_fci_y[i] += reduced_y;
+                            sm_fci_z[i] += reduced_z;
+                        } */
+
+
+
+                        /* }  */// (r2 < rCoulombSq) && notExcluded
 #endif
                     } // (imask & maskJI)
 #endif
