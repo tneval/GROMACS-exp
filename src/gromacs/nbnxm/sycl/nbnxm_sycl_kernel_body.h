@@ -866,12 +866,21 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
     using Xq_z = StaticLocalStorage<float, c_superClusterSize * c_clSize>;
     using Xq_q = StaticLocalStorage<float, c_superClusterSize * c_clSize>;
 
+    using fci_x = StaticLocalStorage<float, c_superClusterSize>;
+    using fci_y = StaticLocalStorage<float, c_superClusterSize>;
+    using fci_z = StaticLocalStorage<float, c_superClusterSize>;
+
     auto sm_xxHostStorage = Xq_x::makeHostStorage(cgh);
     auto sm_xyHostStorage = Xq_y::makeHostStorage(cgh);
     auto sm_xzHostStorage = Xq_z::makeHostStorage(cgh);
     auto sm_xqHostStorage = Xq_q::makeHostStorage(cgh);
 
-    using Xq        = StaticLocalStorage<Float4, c_superClusterSize * c_clSize>;
+
+    auto sm_fci_x_HostStorage = fci_x::makeHostStorage(cgh);
+    auto sm_fci_y_HostStorage = fci_y::makeHostStorage(cgh);
+    auto sm_fci_z_HostStorage = fci_z::makeHostStorage(cgh);
+
+    /* using Xq        = StaticLocalStorage<Float4, c_superClusterSize * c_clSize>; */
     //auto sm_xqHostStorage        = Xq::makeHostStorage(cgh);
 
 #else
@@ -919,17 +928,28 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         } */
 
         // These declarations work on the device.
-        typename Xq::DeviceStorage              sm_xqDeviceStorage;
+        /* typename Xq::DeviceStorage              sm_xqDeviceStorage; */
+
+        typename Xq_x::DeviceStorage    sm_xqxDeviceStorage;
+        typename Xq_y::DeviceStorage    sm_xqyDeviceStorage;
+        typename Xq_z::DeviceStorage    sm_xqzDeviceStorage;
+
+        typename Xq_q::DeviceStorage sm_xqqDeviceStorage;
+
+        typename fci_x::DeviceStorage fcixDeviceStorage;
+        typename fci_y::DeviceStorage fciyDeviceStorage;
+        typename fci_z::DeviceStorage fcizDeviceStorage;
+
         typename AtomTypeI::DeviceStorage       sm_atomTypeIDeviceStorage;
         typename LjCombI::DeviceStorage         sm_ljCombIDeviceStorage;
         typename ReductionBuffer::DeviceStorage sm_reductionBufferDeviceStorage;
         typename PrunedPairCount::DeviceStorage sm_prunedPairCountDeviceStorage;
         // Extract the valid pointer to local storage
 #ifdef SOA
-        sycl::local_ptr<float> sm_x = Xq_x::get_pointer(sm_xxHostStorage, sm_xqDeviceStorage);
-        sycl::local_ptr<float> sm_y = Xq_y::get_pointer(sm_xyHostStorage, sm_xqDeviceStorage);
-        sycl::local_ptr<float> sm_z = Xq_z::get_pointer(sm_xzHostStorage, sm_xqDeviceStorage);
-        sycl::local_ptr<float> sm_q = Xq_q::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
+        sycl::local_ptr<float> sm_x = Xq_x::get_pointer(sm_xxHostStorage, sm_xqxDeviceStorage);
+        sycl::local_ptr<float> sm_y = Xq_y::get_pointer(sm_xyHostStorage, sm_xqyDeviceStorage);
+        sycl::local_ptr<float> sm_z = Xq_z::get_pointer(sm_xzHostStorage, sm_xqxDeviceStorage);
+        sycl::local_ptr<float> sm_q = Xq_q::get_pointer(sm_xqHostStorage, sm_xqqDeviceStorage);
 #else
         sycl::local_ptr<Float4> sm_xq = Xq::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
 #endif
@@ -941,6 +961,12 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 sm_reductionBufferHostStorage, sm_reductionBufferDeviceStorage);
         sycl::local_ptr<int> sm_prunedPairCount = PrunedPairCount::get_pointer(
                 sm_prunedPairCountHostStorage, sm_prunedPairCountDeviceStorage);
+
+
+        sycl::local_ptr<float> sm_fci_x = fci_x::get_pointer(sm_fci_x_HostStorage, fcixDeviceStorage);
+        sycl::local_ptr<float> sm_fci_y = fci_y::get_pointer(sm_fci_y_HostStorage, fciyDeviceStorage);
+        sycl::local_ptr<float> sm_fci_z = fci_z::get_pointer(sm_fci_z_HostStorage, fcizDeviceStorage);
+
 
 #ifdef FLATTENED_GRID
         // This should work for the linearized kernel (64x1x1). Has to force dimensions from launch
@@ -1521,22 +1547,22 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                         fj_z -= forceIJ_z * mask;
 
                         fCiBufX(i) += forceIJ_x * mask;
-                        //float reduced_x = sycl::reduce_over_group(sg, forceIJ_x * mask, sycl::plus<float>());
+                        float reduced_x = sycl::reduce_over_group(sg, forceIJ_x * mask, sycl::plus<float>());
 
                         fCiBufY(i) += forceIJ_y * mask;
-                        //float reduced_y = sycl::reduce_over_group(sg, forceIJ_y * mask, sycl::plus<float>());
+                        float reduced_y = sycl::reduce_over_group(sg, forceIJ_y * mask, sycl::plus<float>());
 
                         fCiBufZ(i) += forceIJ_z * mask;
-                        //float reduced_z = sycl::reduce_over_group(sg, forceIJ_z * mask, sycl::plus<float>());
+                        float reduced_z = sycl::reduce_over_group(sg, forceIJ_z * mask, sycl::plus<float>());
 
 
                         // Note that this only applies in case there is one sg per lane.
                         // Otherwise check if sg_local_id == 0 or something
-                        /* if(tidxi == 0){
+                        if(tidxi == 0){
                             sm_fci_x[i] += reduced_x;
                             sm_fci_y[i] += reduced_y;
                             sm_fci_z[i] += reduced_z;
-                        } */
+                        }
 
 
 
