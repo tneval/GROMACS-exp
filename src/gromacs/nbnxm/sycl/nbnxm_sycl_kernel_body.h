@@ -66,7 +66,8 @@
 #define DO_CALC_ENERGIES
 #define ELEC_CUTOFF
 
-
+#define SINGLE_KERNEL
+//#define ALT_BUF
 
 //#define FLATTENED_GRID
 
@@ -492,10 +493,14 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
         const FCiBufferWrapperZ& fCiBufZ,
         const bool               calcFShift,
         const sycl::nd_item<3>   itemIdx,
+        const int tidx,
         const int                tidxi,
         const int                tidxj,
         const int                sci,
         const int                shift,
+        sycl::local_ptr<float> fci_x,
+        sycl::local_ptr<float> fci_y,
+        sycl::local_ptr<float> fci_z,
         sycl::global_ptr<float> a_fx,
         sycl::global_ptr<float> a_fy,
         sycl::global_ptr<float> a_fz,
@@ -635,16 +640,75 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
         const FCiBufferWrapperZ& fCiBufZ,
         const bool               calcFShift,
         const sycl::nd_item<3>   itemIdx,
+        const int tidx,
         const int                tidxi,
         const int                tidxj,
         const int                sci,
         const int                shift,
+        sycl::local_ptr<float> fci_x,
+        sycl::local_ptr<float> fci_y,
+        sycl::local_ptr<float> fci_z,
         sycl::global_ptr<float> a_fx,
         sycl::global_ptr<float> a_fy,
         sycl::global_ptr<float> a_fz,
         sycl::global_ptr<Float3> a_f,
         sycl::global_ptr<Float3> a_fShift)
 {
+
+#ifdef ALT_BUF
+
+    constexpr int         c_superClusterSize = sc_gpuClusterPerSuperCluster(sc_layoutType);
+    constexpr int         c_clSize           = sc_gpuClusterSize(sc_layoutType);
+    const sycl::sub_group sg                 = itemIdx.get_sub_group();
+    SYCL_ASSERT(sg.get_max_local_range()[0] >= 2 * c_clSize
+                && "Subgroup too small even for 1-step shuffle reduction");
+    SYCL_ASSERT(sg.get_max_local_range()[0] < 4 * c_clSize
+                && "One-step shuffle reduction inefficient, use two-step version");
+    float fShiftBufXY = 0.0F;
+    float fShiftBufZ  = 0.0F;
+
+    float fx = 0;
+    float fy = 0;
+    float fz = 0;
+
+
+    if(itemIdx.get_sub_group().get_local_linear_id() == 0){
+        //#pragma unroll c_superClusterSize
+        #pragma clang loop unroll(disable)
+        for (int ciOffset = 0; ciOffset < c_superClusterSize; ciOffset++)
+        {
+            float x = fci_x[ciOffset];
+            float y = fci_y[ciOffset];
+            float z = fci_z[ciOffset];
+
+            fx += x;
+            fy += y;
+            fz += z;
+
+            const int aidx = (sci * c_superClusterSize + ciOffset) * c_clSize + tidxi;
+
+
+            atomicFetchAdd(a_fx[aidx], x);
+            atomicFetchAdd(a_fy[aidx], y);
+            atomicFetchAdd(a_fz[aidx], z);
+
+
+        }
+        if (calcFShift){
+            atomicFetchAdd(a_fShift[shift][0], fx);
+            atomicFetchAdd(a_fShift[shift][1], fy);
+            atomicFetchAdd(a_fShift[shift][2], fz);
+
+        }
+
+
+    }
+
+
+
+#else // ALT_BUF
+
+
     constexpr int         c_superClusterSize = sc_gpuClusterPerSuperCluster(sc_layoutType);
     constexpr int         c_clSize           = sc_gpuClusterSize(sc_layoutType);
     const sycl::sub_group sg                 = itemIdx.get_sub_group();
@@ -657,7 +721,7 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
 
 
 
-    /* sycl::ext::oneapi::experimental::printf("Single step reduction\n"); */
+
 
 //#pragma unroll c_superClusterSize
     #pragma clang loop unroll(disable)
@@ -718,7 +782,7 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
 #endif
         sycl::group_barrier(itemIdx.get_sub_group());
     }
-    /* add up local shift forces into global mem */
+
     if (calcFShift)
     {
         // Update X and Y by even and odd threads, respectively
@@ -728,6 +792,9 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
             atomicFetchAdd(a_fShift[shift][2], fShiftBufZ);
         }
     }
+
+#endif // ALT_BUF
+
 }
 
 /*! \brief Final i-force reduction.
@@ -745,10 +812,14 @@ static inline void reduceForceIAndFShift(sycl::local_ptr<float>   sm_buf,
                                          const FCiBufferWrapperZ& fCiBufZ,
                                          const bool               calcFShift,
                                          const sycl::nd_item<3>   itemIdx,
+                                         const int tidx,
                                          const int                tidxi,
                                          const int                tidxj,
                                          const int                sci,
                                          const int                shift,
+                                         sycl::local_ptr<float> fci_x,
+                                         sycl::local_ptr<float> fci_y,
+                                         sycl::local_ptr<float> fci_z,
                                          sycl::global_ptr<float> a_fx,
                                          sycl::global_ptr<float> a_fy,
                                          sycl::global_ptr<float> a_fz,
@@ -765,7 +836,7 @@ static inline void reduceForceIAndFShift(sycl::local_ptr<float>   sm_buf,
         static_assert(numSteps > 0 && numSteps <= 3,
                       "Invalid combination of sub-group size and cluster size");
         reduceForceIAndFShiftShuffles<numSteps>(
-                fCiBufX, fCiBufY, fCiBufZ, calcFShift, itemIdx, tidxi, tidxj, sci, shift, a_fx, a_fy, a_fz, a_f, a_fShift);
+                fCiBufX, fCiBufY, fCiBufZ, calcFShift, itemIdx, tidx, tidxi, tidxj, sci, shift, fci_x, fci_y, fci_z, a_fx, a_fy, a_fz, a_f, a_fShift);
     }
     else
     {
@@ -1005,6 +1076,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         auto fCiBufY = [&](auto i) -> float& { return fCiBuf_[i][YY]; };
         auto fCiBufZ = [&](auto i) -> float& { return fCiBuf_[i][ZZ]; };
 #else
+
         float fCiBufX_[c_superClusterSize] = { 0.0F }; // i force buffer
         float fCiBufY_[c_superClusterSize] = { 0.0F }; // i force buffer
         float fCiBufZ_[c_superClusterSize] = { 0.0F }; // i force buffer
@@ -1027,6 +1099,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         constexpr bool c_loadUsingAllXYThreads = (c_clSize == c_superClusterSize);
         if (c_loadUsingAllXYThreads || tidxj < c_superClusterSize)
         {
+            #pragma clang loop unroll(disable)
             for (int i = 0; i < c_superClusterSize; i += c_clSize)
             {
                 /* Pre-load i-atom x and q into shared memory */
@@ -1123,6 +1196,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 && gm_plistCJPacked[cijPackedBegin].cj[0] == sci * c_superClusterSize)
             {
                 // we have the diagonal: add the charge and LJ self interaction energy term
+                #pragma clang loop unroll(disable)
                 for (int i = 0; i < c_superClusterSize; i++)
                 {
                     // TODO: Are there other options?
@@ -1546,26 +1620,27 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                         fj_y -= forceIJ_y * mask;
                         fj_z -= forceIJ_z * mask;
 
-                        fCiBufX(i) += forceIJ_x * mask;
+#ifdef ALT_BUF
                         float reduced_x = sycl::reduce_over_group(sg, forceIJ_x * mask, sycl::plus<float>());
-
-                        fCiBufY(i) += forceIJ_y * mask;
                         float reduced_y = sycl::reduce_over_group(sg, forceIJ_y * mask, sycl::plus<float>());
-
-                        fCiBufZ(i) += forceIJ_z * mask;
                         float reduced_z = sycl::reduce_over_group(sg, forceIJ_z * mask, sycl::plus<float>());
 
 
-                        // Note that this only applies in case there is one sg per lane.
+                        // Note that this only applies in case there is one sg per x-lane.
                         // Otherwise check if sg_local_id == 0 or something
                         if(tidxi == 0){
                             sm_fci_x[i] += reduced_x;
                             sm_fci_y[i] += reduced_y;
                             sm_fci_z[i] += reduced_z;
                         }
+#else // ALT_BUF
+                        //sycl::group_barrier(itemIdx.get_sub_group());
+                        fCiBufX(i) += forceIJ_x * mask;
+                        fCiBufY(i) += forceIJ_y * mask;
+                        fCiBufZ(i) += forceIJ_z * mask;
+#endif // ALT_BUF
 
-
-
+                        sycl::group_barrier(itemIdx.get_sub_group());
                         /* }  */// (r2 < rCoulombSq) && notExcluded
 #endif
                     } // (imask & maskJI)
@@ -1603,7 +1678,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
 #ifdef REDUCE_I
         reduceForceIAndFShift<useShuffleReductionForceI, subGroupSize>(
-                sm_reductionBuffer, fCiBufX, fCiBufY, fCiBufZ, doCalcShift, itemIdx, tidxi, tidxj, sci, nbSci.shift, gm_fx, gm_fy, gm_fz, gm_f, gm_fShift);
+                sm_reductionBuffer, fCiBufX, fCiBufY, fCiBufZ, doCalcShift, itemIdx, tidx, tidxi, tidxj, sci, nbSci.shift, sm_fci_x, sm_fci_y, sm_fci_z, gm_fx, gm_fy, gm_fz, gm_f, gm_fShift);
 #endif
 
 #ifdef GROUP_REDUCE
@@ -1702,7 +1777,12 @@ void launchNbnxmKernelHelper(NbnxmGpu* nb, const gmx::StepWorkload& stepWork, co
     GMX_ASSERT(doCalcEnergies == stepWork.computeEnergy, "Wrong template called");
 
 
+#ifdef SINGLE_KERNEL
+    //chooseAndLaunchNbnxmKernel<subGroupSize, true, true>(
+    chooseAndLaunchNbnxmKernel<subGroupSize, false, false>(
+#else
     chooseAndLaunchNbnxmKernel<subGroupSize, doPruneNBL, doCalcEnergies>(
+#endif
             nbp->elecType,
             nbp->vdwType,
             deviceStream,
