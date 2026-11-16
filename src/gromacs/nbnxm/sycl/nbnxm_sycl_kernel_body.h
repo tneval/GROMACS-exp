@@ -249,6 +249,7 @@ static inline void reduceForceJGeneric(sycl::local_ptr<float>   sm_buf,
     if (tidxi < 3)
     {
         float fSum = 0.0F;
+        #pragma clang loop unroll(disable)
         for (int j = tidxj * c_clSize; j < (tidxj + 1) * c_clSize; j++)
         {
             fSum += sm_buf[sc_fBufferStride * tidxi + j];
@@ -309,7 +310,7 @@ static inline void reduceForceIAndFShiftGeneric(sycl::local_ptr<float>   sm_buf,
     static constexpr int clSizeLog2         = gmx::StaticLog2<c_clSize>::value;
     const int            tidx               = tidxi + tidxj * c_clSize;
     float                fShiftBuf          = 0.0F;
-#pragma unroll c_superClusterSize
+    #pragma clang loop unroll(disable)
     for (int ciOffset = 0; ciOffset < c_superClusterSize; ciOffset++)
     {
         const int aidx = (sci * c_superClusterSize + ciOffset) * c_clSize + tidxi;
@@ -321,6 +322,7 @@ static inline void reduceForceIAndFShiftGeneric(sycl::local_ptr<float>   sm_buf,
 
         // Reduce the initial c_clSize values for each i atom to half every step by using c_clSize * i threads.
         int i = c_clSize / 2;
+        #pragma clang loop unroll(disable)
         for (int j = clSizeLog2 - 1; j > 0; j--)
         {
             if (tidxj < i)
@@ -422,7 +424,7 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
     // Use AMD's cross-lane DPP reduction only for 64-wide exec
     // can't use static_assert because 32-wide compiler passes will trip on it
     SYCL_ASSERT(numShuffleReductionSteps == 3);
-#    pragma unroll c_superClusterSize
+    #pragma clang loop unroll(disable)
     for (int ciOffset = 0; ciOffset < c_superClusterSize; ciOffset++)
     {
         const int aidx = (sci * c_superClusterSize + ciOffset) * c_clSize + tidxj;
@@ -482,7 +484,7 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
     // Two bits for two steps, three bits for three steps.
     constexpr int threadBitMask = (1U << numShuffleReductionSteps) - 1;
 
-#    pragma unroll c_superClusterSize
+    #pragma clang loop unroll(disable)
     for (int ciOffset = 0; ciOffset < c_superClusterSize; ciOffset++)
     {
         const int aidx = (sci * c_superClusterSize + ciOffset) * c_clSize + tidxi;
@@ -568,7 +570,7 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
                 && "One-step shuffle reduction inefficient, use two-step version");
     float fShiftBufXY = 0.0F;
     float fShiftBufZ  = 0.0F;
-#pragma unroll c_superClusterSize
+    #pragma clang loop unroll(disable)
     for (int ciOffset = 0; ciOffset < c_superClusterSize; ciOffset++)
     {
         const int aidx = (sci * c_superClusterSize + ciOffset) * c_clSize + tidxi;
@@ -795,6 +797,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
 #if defined(__SYCL_DEVICE_ONLY__) && defined(__AMDGCN__)
         FCiFloat3 fCiBuf_[c_superClusterSize]; // i force buffer
+        #pragma clang loop unroll(disable)
         for (int i = 0; i < c_superClusterSize; i++)
         {
             fCiBuf_[i] = { 0.0F, 0.0F, 0.0F };
@@ -825,6 +828,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         constexpr bool c_loadUsingAllXYThreads = (c_clSize == c_superClusterSize);
         if (c_loadUsingAllXYThreads || tidxj < c_superClusterSize)
         {
+            #pragma clang loop unroll(disable)
             for (int i = 0; i < c_superClusterSize; i += c_clSize)
             {
                 /* Pre-load i-atom x and q into shared memory */
@@ -880,6 +884,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 && gm_plistCJPacked[cijPackedBegin].cj[0] == sci * c_superClusterSize)
             {
                 // we have the diagonal: add the charge and LJ self interaction energy term
+                #pragma clang loop unroll(disable)
                 for (int i = 0; i < c_superClusterSize; i++)
                 {
                     // TODO: Are there other options?
@@ -920,6 +925,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         const bool nonSelfInteraction = !(nbSci.shift == gmx::c_centralShiftIndex & tidxj <= tidxi);
 
         // loop over the j clusters = seen by any of the atoms in the current super-cluster
+        #pragma clang loop unroll(disable)
         for (int jPacked = cijPackedBegin; jPacked < cijPackedEnd; jPacked += 1)
         {
             MaybeConstT<nbnxm_cj_packed_t, !doPruneNBL>* plistCJPacked =
@@ -961,7 +967,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
             constexpr int unrollFactor = 1; // No unrolling.
 #endif
 
-#pragma unroll unrollFactor
+            #pragma clang loop unroll(disable)
             for (int jm = 0; jm < c_nbnxmGpuJgroupSize; jm++)
             {
                 const bool maskSet = imask & (superClInteractionMask << (jm * c_superClusterSize));
@@ -991,7 +997,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
                 Float3 fCjBuf(0.0F, 0.0F, 0.0F);
 
-#pragma unroll c_superClusterSize
+                #pragma clang loop unroll(disable)
                 for (int i = 0; i < c_superClusterSize; i++)
                 {
                     if (imask & maskJI)
