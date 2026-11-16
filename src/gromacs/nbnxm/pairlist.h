@@ -165,9 +165,14 @@ static inline int atomIndexInClusterpairSplit(const int atomIndex)
 }
 
 //! Whether we want to use GPU for neighbour list sorting
+//
+// Not with AdaptiveCpp: its generic SSCP work-group scan (used by the GPU sorting through
+// sycl::joint_exclusive_scan) reads out of bounds with more than 32 sub-groups per work-group
+// and has a data race with 2-32 sub-groups, which breaks e.g. PoCL with POCL_SUB_GROUP_SIZE=8.
+// The pair list is then sorted on the CPU, as with OpenCL.
 constexpr bool nbnxmSortListsOnGpu()
 {
-    return (GMX_GPU && !GMX_GPU_OPENCL);
+    return (GMX_GPU && !GMX_GPU_OPENCL && !GMX_SYCL_ACPP);
 }
 
 /*! \internal
