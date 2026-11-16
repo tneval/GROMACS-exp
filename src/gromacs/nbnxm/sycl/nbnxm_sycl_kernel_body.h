@@ -997,10 +997,13 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
 
                 Float3 fCjBuf(0.0F, 0.0F, 0.0F);
 
-                #pragma clang loop unroll(disable)
+                // PLAN B: the i loop is unrolled and its body is branchless, so that the
+                // work-item loop around it is innermost and its memory accesses unconditional.
+#pragma unroll c_superClusterSize
                 for (int i = 0; i < c_superClusterSize; i++)
                 {
-                    if (imask & maskJI)
+                    // Instead of skipping the pair, compute it and mask the result.
+                    const bool pairInList = (imask & maskJI) != 0;
                     {
                         // i cluster index
                         const int ci = sci * c_superClusterSize + i;
@@ -1017,7 +1020,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             /* If _none_ of the atoms pairs are in cutoff range,
                              * the bit corresponding to the current
                              * cluster-pair in imask gets set to 0. */
-                            if (!sycl::any_of_group(sg, r2 < rlistOuterSq))
+                            if (pairInList && !sycl::any_of_group(sg, r2 < rlistOuterSq))
                             {
                                 imask &= ~maskJI;
                             }
@@ -1029,14 +1032,10 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                         const bool notExcluded = doExclusionForces ? (nonSelfInteraction | (ci != cj))
                                                                    : (wexcl & maskJI);
 
-#if defined(__SYCL_CUDA_ARCH__)
-                        /* The use of * was benchmarked in 2024 for DPC++ 2024.1 CUDA and
-                         * found to be faster than the use of &&, just like for CUDA.
-                         * "&&" is still better for Intel and AMD devices. */
-                        if ((r2 < rCoulombSq) * notExcluded)
-#else // Intel and AMD paths
-                        if ((r2 < rCoulombSq) && notExcluded)
-#endif
+                        // The force and energy contributions are multiplied by this mask
+                        // instead of branching on the condition.
+                        const float pairMask =
+                                (pairInList && (r2 < rCoulombSq) && notExcluded) ? 1.0F : 0.0F;
                         {
                             const float qi = xqi[3];
                             int         atomTypeI; // Only needed if (!props.vdwComb)
@@ -1150,7 +1149,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             }
                             if constexpr (doCalcEnergies)
                             {
-                                energyVdw += energyLJPair;
+                                energyVdw += energyLJPair * pairMask;
                             }
 
                             if constexpr (props.elecCutoff)
@@ -1186,22 +1185,22 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             {
                                 if constexpr (props.elecCutoff)
                                 {
-                                    energyElec += qi * qj * (pairExclMask * rInv - cRF);
+                                    energyElec += pairMask * qi * qj * (pairExclMask * rInv - cRF);
                                 }
                                 if constexpr (props.elecRF)
                                 {
-                                    energyElec +=
-                                            qi * qj * (pairExclMask * rInv + 0.5F * twoKRf * r2 - cRF);
+                                    energyElec += pairMask * qi * qj
+                                                  * (pairExclMask * rInv + 0.5F * twoKRf * r2 - cRF);
                                 }
                                 if constexpr (props.elecEwald)
                                 {
-                                    energyElec += qi * qj
+                                    energyElec += pairMask * qi * qj
                                                   * (rInv * (pairExclMask - sycl::erf(r2 * rInv * ewaldBeta))
                                                      - pairExclMask * ewaldShift);
                                 }
                             }
 
-                            const Float3 forceIJ = rv * fInvR;
+                            const Float3 forceIJ = rv * (fInvR * pairMask);
 
                             /* accumulate j forces in registers */
                             fCjBuf -= forceIJ;
