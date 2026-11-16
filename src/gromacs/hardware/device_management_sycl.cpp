@@ -320,11 +320,11 @@ static DeviceStatus isDeviceCompatible(const sycl::device&           syclDevice,
             return DeviceStatus::IncompatibleClusterSize;
         }
 
-        if (deviceVendor == DeviceVendor::PoclCpu)
+        /* if (deviceVendor == DeviceVendor::PoclCpu)
         {
             // PoCL CPU not yet tested with ACPP, only allow DPCPP for now.
             return GMX_SYCL_DPCPP ? DeviceStatus::Compatible : DeviceStatus::Incompatible;
-        }
+        } */
 
         return DeviceStatus::Compatible;
     }
@@ -590,11 +590,13 @@ std::vector<std::unique_ptr<DeviceInformation>> findDevices()
         deviceInfos[i]->id         = i;
         deviceInfos[i]->syclDevice = syclDevice;
 
+
+        std::cout << syclDevice.get_platform().get_info<sycl::info::platform::name>() << std::endl;
         // In case we have PoCL as SYCL backend and the device is CPU, set the 'special' PoCL vendor.
         // This way we can use any CPU under the PoCL vendor.
         // If we have PoCL and GPU (for example PoCL->L0->Intel GPU), we will use the actual device vendor.
         if (syclDevice.is_cpu()
-            && syclDevice.get_platform().get_info<sycl::info::platform::name>() == sc_poclPlatformString)
+          /*   && syclDevice.get_platform().get_info<sycl::info::platform::name>() == sc_poclPlatformString */)
         {
             deviceInfos[i]->deviceVendor = DeviceVendor::PoclCpu;
         }
