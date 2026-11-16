@@ -110,14 +110,20 @@ extern template void launchNbnxmKernelHelper<64, true, true>(NbnxmGpu* nb, const
 template<int subGroupSize>
 void launchNbnxmKernel(NbnxmGpu* nb, const gmx::StepWorkload& stepWork, const InteractionLocality iloc, bool doPrune)
 {
-    const bool doCalcEnergies = stepWork.computeEnergy;
-
-    gmx::dispatchTemplatedFunction(
-            [&](auto doPruneNBL_, auto doCalcEnergies_) {
-                launchNbnxmKernelHelper<subGroupSize, doPruneNBL_, doCalcEnergies_>(nb, stepWork, iloc);
-            },
-            doPrune,
-            doCalcEnergies);
+    // ANALYSIS: always launch the same kernel variant (no pruning, no energies), so that
+    // only one nbnxm kernel gets JIT-compiled. Forces, virial and dynamics stay correct:
+    // the kernel checks the cut-off itself, the list is just never pruned (more pairs).
+    // The LJ (SR) and Coulomb (SR) energies are not computed and show as 0.
+    // Original dispatch:
+    //     gmx::dispatchTemplatedFunction(
+    //             [&](auto doPruneNBL_, auto doCalcEnergies_) {
+    //                 launchNbnxmKernelHelper<subGroupSize, doPruneNBL_, doCalcEnergies_>(
+    //                         nb, stepWork, iloc);
+    //             },
+    //             doPrune,
+    //             stepWork.computeEnergy);
+    (void)doPrune;
+    launchNbnxmKernelHelper<subGroupSize, false, false>(nb, stepWork, iloc);
 }
 
 void launchNbnxmKernel(NbnxmGpu* nb, const gmx::StepWorkload& stepWork, const InteractionLocality iloc, bool doPrune)
