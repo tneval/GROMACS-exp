@@ -38,6 +38,8 @@
  *
  *  \ingroup module_nbnxm
  */
+#include <cstdio>
+#include <cstdlib>
 
 #include <type_traits>
 
@@ -90,6 +92,29 @@ using FCiFloat3 = Float3;
 constexpr bool c_avoidFloatingPointAtomics(PairlistType layoutType)
 {
     return (sc_gpuClusterSize(layoutType) == 4);
+}
+
+/*! \brief Add to the force array (gm_f / a_f).
+ *
+ * EXPERIMENT: with \p nonAtomic (environment variable GMX_NBNXM_NONATOMIC_FORCES, see
+ * launchNbnxmKernelHelper) this is a plain read-add-write instead of a float atomic. On x86
+ * PoCL CPU a float atomic is a lock-cmpxchg loop. The plain version is ONLY CORRECT WHEN THE
+ * WORK-GROUPS RUN ONE AT A TIME (POCL_CPU_MAX_CU_COUNT=1): otherwise two work-groups can update
+ * the same j-atom at the same time. All call sites write a distinct address per work-item, so
+ * it is safe when PoCL runs the work-items of one work-group as vector lanes. Shift forces and
+ * energies (several work-items, one address) always use atomicFetchAdd.
+ */
+template<typename T>
+static inline void forceFetchAdd(T& val, const T delta, const bool nonAtomic)
+{
+    if (nonAtomic)
+    {
+        val += delta;
+    }
+    else
+    {
+        atomicFetchAdd(val, delta);
+    }
 }
 
 using sycl::access::fence_space;
@@ -145,7 +170,8 @@ static inline void reduceForceJShuffle(Float3                   f,
                                        const sycl::nd_item<3>&  itemIdx,
                                        const int                tidxi,
                                        const int                aidx,
-                                       sycl::global_ptr<Float3> a_f)
+                                       sycl::global_ptr<Float3> a_f,
+                                       const bool               nonAtomicForces)
 {
     constexpr int c_clSize = sc_gpuClusterSize(sc_layoutType);
     static_assert(c_clSize == 8 || c_clSize == 4);
@@ -173,7 +199,7 @@ static inline void reduceForceJShuffle(Float3                   f,
 
     if (tidxi < 3)
     {
-        atomicFetchAdd(a_f[aidx][tidxi], f[0]);
+        forceFetchAdd(a_f[aidx][tidxi], f[0], nonAtomicForces);
     }
 }
 
@@ -232,7 +258,8 @@ static inline void reduceForceJGeneric(sycl::local_ptr<float>   sm_buf,
                                        const int                tidxi,
                                        const int                tidxj,
                                        const int                aidx,
-                                       sycl::global_ptr<Float3> a_f)
+                                       sycl::global_ptr<Float3> a_f,
+                                       const bool               nonAtomicForces)
 {
     constexpr int        c_clSize         = sc_gpuClusterSize(sc_layoutType);
     static constexpr int sc_fBufferStride = c_clSize * c_clSize;
@@ -255,7 +282,7 @@ static inline void reduceForceJGeneric(sycl::local_ptr<float>   sm_buf,
             fSum += sm_buf[sc_fBufferStride * tidxi + j];
         }
 
-        atomicFetchAdd(a_f[aidx][tidxi], fSum);
+        forceFetchAdd(a_f[aidx][tidxi], fSum, nonAtomicForces);
     }
 }
 
@@ -269,18 +296,19 @@ static inline void reduceForceJ(sycl::local_ptr<float>   sm_buf,
                                 const int                tidxi,
                                 const int                tidxj,
                                 const int                aidx,
-                                sycl::global_ptr<Float3> a_f)
+                                sycl::global_ptr<Float3> a_f,
+                                const bool               nonAtomicForces)
 {
     if constexpr (!useShuffleReduction)
     {
-        reduceForceJGeneric(sm_buf, f, itemIdx, tidxi, tidxj, aidx, a_f);
+        reduceForceJGeneric(sm_buf, f, itemIdx, tidxi, tidxj, aidx, a_f, nonAtomicForces);
     }
     else
     {
 #if defined(__SYCL_DEVICE_ONLY__) && defined(__AMDGCN__)
         reduceForceJAmdDpp(f, tidxi, aidx, a_f);
 #else
-        reduceForceJShuffle(f, itemIdx, tidxi, aidx, a_f);
+        reduceForceJShuffle(f, itemIdx, tidxi, aidx, a_f, nonAtomicForces);
 #endif
     }
 }
@@ -302,7 +330,8 @@ static inline void reduceForceIAndFShiftGeneric(sycl::local_ptr<float>   sm_buf,
                                                 const int                sci,
                                                 const int                shift,
                                                 sycl::global_ptr<Float3> a_f,
-                                                sycl::global_ptr<Float3> a_fShift)
+                                                sycl::global_ptr<Float3> a_fShift,
+                                                const bool               nonAtomicForces)
 {
     constexpr int        c_clSize           = sc_gpuClusterSize(sc_layoutType);
     constexpr int        c_superClusterSize = sc_gpuClusterPerSuperCluster(sc_layoutType);
@@ -343,7 +372,7 @@ static inline void reduceForceIAndFShiftGeneric(sycl::local_ptr<float>   sm_buf,
         {
             const float f =
                     sm_buf[tidxj * bufStride + tidxi] + sm_buf[tidxj * bufStride + c_clSize + tidxi];
-            atomicFetchAdd(a_f[aidx][tidxj], f);
+            forceFetchAdd(a_f[aidx][tidxj], f, nonAtomicForces);
             if (calcFShift)
             {
                 fShiftBuf += f;
@@ -409,7 +438,8 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
         const int                sci,
         const int                shift,
         sycl::global_ptr<Float3> a_f,
-        sycl::global_ptr<Float3> a_fShift)
+        sycl::global_ptr<Float3> a_fShift,
+        const bool               nonAtomicForces)
 {
     constexpr int         c_superClusterSize = sc_gpuClusterPerSuperCluster(sc_layoutType);
     constexpr int         c_clSize           = sc_gpuClusterSize(sc_layoutType);
@@ -460,7 +490,7 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
         if (tidxi < 3)
         {
             float* ptr = indexedAddress(reinterpret_cast<float*>(a_f.get()), 3 * aidx + tidxi);
-            atomicFetchAdd(*ptr, fx);
+            forceFetchAdd(*ptr, fx, nonAtomicForces);
 
             if (calcFShift)
             {
@@ -515,7 +545,7 @@ typename std::enable_if_t<numShuffleReductionSteps != 1, void> static inline red
         // Threads 0,1,2 (and 4,5,6 in case of numShuffleReductionSteps == 2) increment X, Y, Z for their sub-groups
         if ((tidxj & threadBitMask) < 3)
         {
-            atomicFetchAdd(a_f[aidx][(tidxj & threadBitMask)], fx);
+            forceFetchAdd(a_f[aidx][(tidxj & threadBitMask)], fx, nonAtomicForces);
 
             if (calcFShift)
             {
@@ -559,7 +589,8 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
         const int                sci,
         const int                shift,
         sycl::global_ptr<Float3> a_f,
-        sycl::global_ptr<Float3> a_fShift)
+        sycl::global_ptr<Float3> a_fShift,
+        const bool               nonAtomicForces)
 {
     constexpr int         c_superClusterSize = sc_gpuClusterPerSuperCluster(sc_layoutType);
     constexpr int         c_clSize           = sc_gpuClusterSize(sc_layoutType);
@@ -587,7 +618,7 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
         }
         // Can not use shuffles to reduce further, do global atomics
         // Add the current X and Y values to the global buffer
-        atomicFetchAdd(a_f[aidx][(tidxj & 1)], fx);
+        forceFetchAdd(a_f[aidx][(tidxj & 1)], fx, nonAtomicForces);
         if (calcFShift)
         {
             fShiftBufXY += fx;
@@ -595,7 +626,7 @@ typename std::enable_if_t<numShuffleReductionSteps == 1, void> static inline red
         // Threads tidxj == 0 or 2 increment Z
         if ((tidxj & 1) == 0)
         {
-            atomicFetchAdd(a_f[aidx][2], fz);
+            forceFetchAdd(a_f[aidx][2], fz, nonAtomicForces);
             if (calcFShift)
             {
                 fShiftBufZ += fz;
@@ -635,7 +666,8 @@ static inline void reduceForceIAndFShift(sycl::local_ptr<float>   sm_buf,
                                          const int                sci,
                                          const int                shift,
                                          sycl::global_ptr<Float3> a_f,
-                                         sycl::global_ptr<Float3> a_fShift)
+                                         sycl::global_ptr<Float3> a_fShift,
+                                         const bool               nonAtomicForces)
 {
     // must have power of two elements in fCiBuf
     static_assert(gmx::isPowerOfTwo(sc_gpuClusterPerSuperCluster(sc_layoutType)));
@@ -646,12 +678,12 @@ static inline void reduceForceIAndFShift(sycl::local_ptr<float>   sm_buf,
         static_assert(numSteps > 0 && numSteps <= 3,
                       "Invalid combination of sub-group size and cluster size");
         reduceForceIAndFShiftShuffles<numSteps>(
-                fCiBufX, fCiBufY, fCiBufZ, calcFShift, itemIdx, tidxi, tidxj, sci, shift, a_f, a_fShift);
+                fCiBufX, fCiBufY, fCiBufZ, calcFShift, itemIdx, tidxi, tidxj, sci, shift, a_f, a_fShift, nonAtomicForces);
     }
     else
     {
         reduceForceIAndFShiftGeneric(
-                sm_buf, fCiBufX, fCiBufY, fCiBufZ, calcFShift, itemIdx, tidxi, tidxj, sci, shift, a_f, a_fShift);
+                sm_buf, fCiBufX, fCiBufY, fCiBufZ, calcFShift, itemIdx, tidxi, tidxj, sci, shift, a_f, a_fShift, nonAtomicForces);
     }
 }
 
@@ -696,7 +728,8 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                         const float           rVdwSwitch,
                         const float           ljEwaldShift,
                         const float           coulombTabScale,
-                        const bool            calcShift)
+                        const bool            calcShift,
+                        const bool            nonAtomicForces)
 {
     static constexpr EnergyFunctionProperties<elecType, vdwType> props;
 
@@ -1219,7 +1252,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 } // for (int i = 0; i < c_nbnxmGpuNumClusterPerSupercluster; i++)
                 /* reduce j forces */
                 reduceForceJ<useShuffleReductionForceJ>(
-                        sm_reductionBuffer, fCjBuf, itemIdx, tidxi, tidxj, aj, gm_f);
+                        sm_reductionBuffer, fCjBuf, itemIdx, tidxi, tidxj, aj, gm_f, nonAtomicForces);
             } // for (int jm = 0; jm < c_nbnxmGpuJgroupSize; jm++)
             if constexpr (doPruneNBL)
             {
@@ -1237,7 +1270,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         const bool doCalcShift = (calcShift && nbSci.shift != gmx::c_centralShiftIndex);
 
         reduceForceIAndFShift<useShuffleReductionForceI, subGroupSize>(
-                sm_reductionBuffer, fCiBufX, fCiBufY, fCiBufZ, doCalcShift, itemIdx, tidxi, tidxj, sci, nbSci.shift, gm_f, gm_fShift);
+                sm_reductionBuffer, fCiBufX, fCiBufY, fCiBufZ, doCalcShift, itemIdx, tidxi, tidxj, sci, nbSci.shift, gm_f, gm_fShift, nonAtomicForces);
 
         if constexpr (doCalcEnergies)
         {
@@ -1314,6 +1347,30 @@ void chooseAndLaunchNbnxmKernel(enum ElecType elecType, enum VdwType vdwType, Ar
             vdwType);
 }
 
+/*! \brief EXPERIMENT: whether GMX_NBNXM_NONATOMIC_FORCES is set (read once).
+ *
+ * It replaces the float atomics of the force array with plain adds (see forceFetchAdd).
+ * ONLY CORRECT WHEN THE WORK-GROUPS RUN ONE AT A TIME, e.g. PoCL CPU with POCL_CPU_MAX_CU_COUNT=1.
+ */
+inline bool nbnxmNonAtomicForcesRequested()
+{
+    static bool sc_checked   = false;
+    static bool sc_requested = false;
+    if (!sc_checked)
+    {
+        sc_checked   = true;
+        sc_requested = (std::getenv("GMX_NBNXM_NONATOMIC_FORCES") != nullptr);
+        if (sc_requested)
+        {
+            std::fprintf(stderr,
+                         "\nNOTE: GMX_NBNXM_NONATOMIC_FORCES is set: the NBNxM SYCL kernel adds forces "
+                         "without atomics. This is only correct when the device runs one work-group at "
+                         "a time (e.g. PoCL CPU with POCL_CPU_MAX_CU_COUNT=1).\n\n");
+        }
+    }
+    return sc_requested;
+}
+
 template<int subGroupSize, bool doPruneNBL, bool doCalcEnergies>
 void launchNbnxmKernelHelper(NbnxmGpu* nb, const gmx::StepWorkload& stepWork, const InteractionLocality iloc)
 {
@@ -1363,7 +1420,8 @@ void launchNbnxmKernelHelper(NbnxmGpu* nb, const gmx::StepWorkload& stepWork, co
             nbp->rvdw_switch,
             nbp->sh_lj_ewald,
             nbp->coulomb_tab_scale,
-            stepWork.computeVirial);
+            stepWork.computeVirial,
+            nbnxmNonAtomicForcesRequested());
 }
 
 } // namespace gmx
