@@ -758,10 +758,16 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
             && !(numReductionSteps == 1 && c_avoidFloatingPointAtomics(sc_layoutType));
     constexpr bool useShuffleReductionForceJ = gmx::isPowerOfTwo(c_superClusterSize);
 
-    // Local memory buffer for i x+q pre-loading
-    using Xq        = StaticLocalStorage<Float4, c_superClusterSize * c_clSize>;
-    using AtomTypeI = StaticLocalStorage<int, c_superClusterSize * c_clSize, !props.vdwComb>;
-    using LjCombI   = StaticLocalStorage<Float2, c_superClusterSize * c_clSize, props.vdwComb>;
+    // Local memory buffer for i x+q pre-loading.
+    // EXPERIMENT (SoA): the i-atom data is stored as separate arrays per component, x, y, z and q
+    // for xq, and the two LJ combination parameters for ljComb: component c of i-atom k is at
+    // [c * c_numIAtoms + k]. The work-items of a row (consecutive tidxi) then read consecutive
+    // floats, which is one vector load when the work-items are vectorized (e.g. PoCL CPU). With the
+    // Float4/Float2 array-of-structures layout the compiler has to transpose the data.
+    constexpr int c_numIAtoms = c_superClusterSize * c_clSize;
+    using Xq                  = StaticLocalStorage<float, 4 * c_numIAtoms>;
+    using AtomTypeI           = StaticLocalStorage<int, c_numIAtoms, !props.vdwComb>;
+    using LjCombI             = StaticLocalStorage<float, 2 * c_numIAtoms, props.vdwComb>;
     auto sm_xqHostStorage        = Xq::makeHostStorage(cgh);
     auto sm_atomTypeIHostStorage = AtomTypeI::makeHostStorage(cgh);
     auto sm_ljCombIHostStorage   = LjCombI::makeHostStorage(cgh);
@@ -806,10 +812,10 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         typename ReductionBuffer::DeviceStorage sm_reductionBufferDeviceStorage;
         typename PrunedPairCount::DeviceStorage sm_prunedPairCountDeviceStorage;
         // Extract the valid pointer to local storage
-        sycl::local_ptr<Float4> sm_xq = Xq::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
+        sycl::local_ptr<float>  sm_xq = Xq::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
         sycl::local_ptr<int>    sm_atomTypeI =
                 AtomTypeI::get_pointer(sm_atomTypeIHostStorage, sm_atomTypeIDeviceStorage);
-        sycl::local_ptr<Float2> sm_ljCombI =
+        sycl::local_ptr<float> sm_ljCombI =
                 LjCombI::get_pointer(sm_ljCombIHostStorage, sm_ljCombIDeviceStorage);
         sycl::local_ptr<float> sm_reductionBuffer = ReductionBuffer::get_pointer(
                 sm_reductionBufferHostStorage, sm_reductionBufferDeviceStorage);
@@ -873,7 +879,10 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 Float4       xqi   = gm_xq[ai];
                 xqi += Float4(shift[0], shift[1], shift[2], 0.0F);
                 xqi[3] *= epsFac;
-                sm_xq[cacheIdx] = xqi;
+                sm_xq[0 * c_numIAtoms + cacheIdx] = xqi[0];
+                sm_xq[1 * c_numIAtoms + cacheIdx] = xqi[1];
+                sm_xq[2 * c_numIAtoms + cacheIdx] = xqi[2];
+                sm_xq[3 * c_numIAtoms + cacheIdx] = xqi[3];
 
                 if constexpr (!props.vdwComb)
                 {
@@ -883,7 +892,9 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 else
                 {
                     // Pre-load the LJ combination parameters into shared memory
-                    sm_ljCombI[cacheIdx] = gm_ljComb[ai];
+                    const Float2 ljCombI                  = gm_ljComb[ai];
+                    sm_ljCombI[0 * c_numIAtoms + cacheIdx] = ljCombI[0];
+                    sm_ljCombI[1 * c_numIAtoms + cacheIdx] = ljCombI[1];
                 }
             }
         }
@@ -923,7 +934,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                     // TODO: Are there other options?
                     if constexpr (props.elecEwald || props.elecRF || props.elecCutoff)
                     {
-                        const float qi = sm_xq[i * c_clSize + tidxi][3];
+                        const float qi = sm_xq[3 * c_numIAtoms + i * c_clSize + tidxi];
                         energyElec += qi * qi;
                     }
                     if constexpr (props.vdwEwald)
@@ -1041,7 +1052,11 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                         // i cluster index
                         const int ci = sci * c_superClusterSize + i;
                         // all threads load an atom from i cluster ci into shmem!
-                        const Float4 xqi = sm_xq[i * c_clSize + tidxi];
+                        const int    iAtomIdx = i * c_clSize + tidxi;
+                        const Float4 xqi(sm_xq[0 * c_numIAtoms + iAtomIdx],
+                                         sm_xq[1 * c_numIAtoms + iAtomIdx],
+                                         sm_xq[2 * c_numIAtoms + iAtomIdx],
+                                         sm_xq[3 * c_numIAtoms + iAtomIdx]);
                         const Float3 xi(xqi[0], xqi[1], xqi[2]);
 
                         // distance between i and j atoms
@@ -1083,7 +1098,9 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             }
                             else
                             {
-                                const Float2 ljCombI = sm_ljCombI[i * c_clSize + tidxi];
+                                const Float2 ljCombI(
+                                        sm_ljCombI[0 * c_numIAtoms + i * c_clSize + tidxi],
+                                        sm_ljCombI[1 * c_numIAtoms + i * c_clSize + tidxi]);
                                 if constexpr (props.vdwCombGeom)
                                 {
                                     c6c12 = Float2(ljCombI[0] * ljCombJ[0], ljCombI[1] * ljCombJ[1]);
@@ -1108,8 +1125,10 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             // Ensure distance do not become so small that r^-12 overflows
                             r2 = sycl::max(r2, c_nbnxmMinDistanceSquared);
 #if GMX_SYCL_ACPP
-                            // No fast/native functions in some compilation passes
-                            const float rInv = sycl::rsqrt(r2);
+                            // No fast/native functions in some compilation passes.
+                            // EXPERIMENT: 1/sqrt with -ffast-math keeps 'fdiv fast' through SPIR-V,
+                            // so the x86 backend emits rsqrtss/rsqrtps + one Newton-Raphson step.
+                            const float rInv = 1.0F / sycl::sqrt(r2);
 #else
                             // SYCL-TODO: sycl::half_precision::rsqrt?
                             const float rInv = sycl::native::rsqrt(r2);
