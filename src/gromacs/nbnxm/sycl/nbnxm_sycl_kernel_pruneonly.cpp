@@ -84,11 +84,22 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
     constexpr int          c_clusterPairSplit     = sc_gpuClusterPairSplit(layoutType);
     constexpr unsigned int superClInteractionMask = sc_superClInteractionMask(layoutType);
 
-    // Local memory buffer for i x+q pre-loading
-    using Xq              = StaticLocalStorage<Float4, c_superClusterSize * c_clSize>;
+    // Local memory buffer for i x pre-loading.
+    // EXPERIMENT (SoA): x, y and z of the i-atoms are stored as separate arrays: component c of
+    // i-atom k is at [c * c_numIAtoms + k]. The work-items of a row (consecutive tidxi) then read
+    // consecutive floats, which is one vector load when the work-items are vectorized (PoCL CPU).
+    // q is not needed by the pruning.
+    constexpr int c_numIAtoms   = c_superClusterSize * c_clSize;
+    using Xq                    = StaticLocalStorage<float, 3 * c_numIAtoms>;
     using PrunedPairCount = StaticLocalStorage<int, 1, haveFreshList && nbnxmSortListsOnGpu()>;
     auto sm_xqHostStorage = Xq::makeHostStorage(cgh);
     auto sm_prunedPairCountHostStorage = PrunedPairCount::makeHostStorage(cgh);
+
+    // EXPERIMENT: buffer for combining the per-work-item range check bits over a sub-group, see
+    // the jm loop. One entry per work-item, two buffers used alternately.
+    constexpr int c_numWorkItems = c_syclPruneKernelJPackedConcurrency * c_clSize * c_clSize;
+    using RangeBits              = StaticLocalStorage<unsigned int, 2 * c_numWorkItems>;
+    auto sm_rangeBitsHostStorage = RangeBits::makeHostStorage(cgh);
 
     constexpr int warpSize = sc_gpuParallelExecutionWidth(layoutType);
 
@@ -109,8 +120,11 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
         // These declarations work on the device.
         typename Xq::DeviceStorage              sm_xqDeviceStorage;
         typename PrunedPairCount::DeviceStorage sm_prunedPairCountDeviceStorage;
+        typename RangeBits::DeviceStorage       sm_rangeBitsDeviceStorage;
         // Extract the valid pointer to local storage
-        sycl::local_ptr<Float4> sm_xq = Xq::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
+        sycl::local_ptr<float> sm_xq = Xq::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
+        sycl::local_ptr<unsigned int> sm_rangeBits =
+                RangeBits::get_pointer(sm_rangeBitsHostStorage, sm_rangeBitsDeviceStorage);
         sycl::local_ptr<int>    sm_prunedPairCount = PrunedPairCount::get_pointer(
                 sm_prunedPairCountHostStorage, sm_prunedPairCountDeviceStorage);
         // thread/block/warp id-s
@@ -157,10 +171,12 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
 
                 /* We don't need q, but using float4 in shmem avoids bank conflicts.
                    (but it also wastes L2 bandwidth). */
-                const Float4 xq    = gm_xq[ai];
-                const Float3 shift = gm_shiftVec[nbSci.shift];
-                const Float4 xi(xq[0] + shift[0], xq[1] + shift[1], xq[2] + shift[2], xq[3]);
-                sm_xq[(tidxj + i) * c_clSize + tidxi] = xi;
+                const Float4 xq       = gm_xq[ai];
+                const Float3 shift    = gm_shiftVec[nbSci.shift];
+                const int    cacheIdx = (tidxj + i) * c_clSize + tidxi;
+                sm_xq[0 * c_numIAtoms + cacheIdx] = xq[0] + shift[0];
+                sm_xq[1 * c_numIAtoms + cacheIdx] = xq[1] + shift[1];
+                sm_xq[2 * c_numIAtoms + cacheIdx] = xq[2] + shift[2];
             }
         }
         /* Initialise one int for reducing prunedPairCount over warps */
@@ -175,6 +191,11 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
         itemIdx.barrier(fence_space::local_space);
 
         int prunedPairCount = 0;
+        // EXPERIMENT: which of the two sm_rangeBits buffers the next sub-group combination uses.
+        // Toggled after each combination, so two consecutive combinations always use different
+        // buffers and are separated by a barrier (jm iterations can be skipped, so jm itself cannot
+        // be used). Uniform within the sub-group.
+        int rangeBitsBuffer = 0;
         /* loop over the j clusters = seen by any of the atoms in the current super-cluster.
          * The loop stride c_syclPruneKernelJPackedConcurrency ensures that consecutive warps-pairs
          * are assigned consecutive jPacked's entries. */
@@ -206,12 +227,26 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
 
             if (imaskCheck)
             {
+                // EXPERIMENT: the range checks of the 8 i-clusters are done without branches, and
+                // the results are combined over the sub-group once per jm, instead of two
+                // any_of_group() votes per i-cluster. Each work-item sets bit i of its bits when
+                // its pair with i-cluster i is in range (inner list range in the low 8 bits, outer
+                // range in the next 8). The bits are ORed over the sub-group through local memory:
+                // one sub-group barrier per jm instead of up to 16 votes, and the i loop has no
+                // barriers inside so it can be vectorized across the work-items.
+                // Entries are indexed by the sub-group id and the sub-group local id, so this does
+                // not assume how the work-items are mapped to the sub-groups.
+                static_assert(c_superClusterSize <= 8, "8 bits per range check");
+                const int sgMaxSize  = sg.get_max_local_range()[0];
+                const int sgBase     = sg.get_group_linear_id() * sgMaxSize;
+                const int sgLocalId  = sg.get_local_linear_id();
+                const int sgSize     = sg.get_local_linear_range();
                 for (int jm = 0; jm < sc_gpuJgroupSize(layoutType); jm++)
                 {
-                    if (imaskCheck & (superClInteractionMask << (jm * c_superClusterSize)))
+                    const unsigned checkBits =
+                            (imaskCheck >> (jm * c_superClusterSize)) & superClInteractionMask;
+                    if (checkBits)
                     {
-                        unsigned mask_ji = (1U << (jm * c_superClusterSize));
-                        // SYCL-TODO: Reevaluate prefetching methods
                         const int cj = *indexedAddress(plistCJPacked->cj, jm);
                         const int aj = cj * c_clSize + tidxj;
 
@@ -219,35 +254,51 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
                         const Float4 tmp = *indexedAddress(gm_xq, aj);
                         const Float3 xj(tmp[0], tmp[1], tmp[2]);
 
+                        unsigned rangeBits = 0;
                         for (int i = 0; i < c_superClusterSize; i++)
                         {
-                            if (imaskCheck & mask_ji)
+                            // load i-cluster coordinates from shmem
+                            const int iAtomIdx = i * c_clSize + tidxi;
+                            Float3 rv(sm_xq[0 * c_numIAtoms + iAtomIdx],
+                                      sm_xq[1 * c_numIAtoms + iAtomIdx],
+                                      sm_xq[2 * c_numIAtoms + iAtomIdx]);
+                            rv -= xj;
+                            const float r2 = norm2(rv);
+                            rangeBits |= (r2 < rlistInnerSq ? 1U : 0U) << i;
+                            if constexpr (haveFreshList)
                             {
-                                // load i-cluster coordinates from shmem
-                                const Float4 xi = sm_xq[i * c_clSize + tidxi];
-                                // distance between i and j atoms
-                                Float3 rv(xi[0], xi[1], xi[2]);
-                                rv -= xj;
-                                const float r2 = norm2(rv);
+                                rangeBits |= (r2 < rlistOuterSq ? 1U : 0U) << (8 + i);
+                            }
+                        }
 
-                                /* If _none_ of the atoms pairs are in rlistOuter
-                                 * range, the bit corresponding to the current
-                                 * cluster-pair in imask gets set to 0. */
-                                if (haveFreshList && !(sycl::any_of_group(sg, r2 < rlistOuterSq)))
-                                {
-                                    imaskFull &= ~mask_ji;
-                                }
-                                /* If any atom pair is within range, set the bit
-                                 * corresponding to the current cluster-pair. */
-                                if (sycl::any_of_group(sg, r2 < rlistInnerSq))
-                                {
-                                    imaskNew |= mask_ji;
-                                }
-                            } // (imaskCheck & mask_ji)
-                            /* shift the mask bit by 1 */
-                            mask_ji += mask_ji;
-                        } // (int i = 0; i < c_nbnxmGpuNumClusterPerSupercluster; i++)
-                    } // (imaskCheck & (superClInteractionMask << (jm * c_nbnxmGpuNumClusterPerSupercluster)))
+                        // OR the bits over the sub-group. Two buffers used alternately: the
+                        // barrier of the next combination ensures all reads of this one are done
+                        // before the buffer is written again.
+                        sycl::local_ptr<unsigned int> buffer =
+                                sm_rangeBits + rangeBitsBuffer * c_numWorkItems;
+                        buffer[sgBase + sgLocalId] = rangeBits;
+                        sycl::group_barrier(sg);
+                        unsigned subGroupBits = 0;
+                        for (int k = 0; k < sgSize; k++)
+                        {
+                            subGroupBits |= buffer[sgBase + k];
+                        }
+                        rangeBitsBuffer = 1 - rangeBitsBuffer;
+
+                        const int jmShift = jm * c_superClusterSize;
+                        /* If _none_ of the atoms pairs are in rlistOuter
+                         * range, the bit corresponding to the cluster-pair
+                         * in imask gets set to 0. */
+                        if constexpr (haveFreshList)
+                        {
+                            const unsigned outerBits = (subGroupBits >> 8) & superClInteractionMask;
+                            imaskFull &= ~((checkBits & ~outerBits) << jmShift);
+                        }
+                        /* If any atom pair is within range, set the bit
+                         * corresponding to the cluster-pair. */
+                        const unsigned innerBits = subGroupBits & superClInteractionMask;
+                        imaskNew |= (checkBits & innerBits) << jmShift;
+                    }
                 } // for (int jm = 0; jm < c_nbnxmGpuJgroupSize; jm++)
 
                 if constexpr (haveFreshList)
