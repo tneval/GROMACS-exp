@@ -792,6 +792,16 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
     auto sm_reductionBufferHostStorage = ReductionBuffer::makeHostStorage(cgh);
     auto sm_prunedPairCountHostStorage = PrunedPairCount::makeHostStorage(cgh);
 
+    // The i-force accumulators in local memory, laid out [i-cluster][work-item] separately for x, y
+    // and z. Each work-item uses only its own entries. In the i loop the consecutive work-items
+    // access consecutive floats, which is one vector load/store when the work-items are vectorized
+    // (PoCL CPU), and the accumulators do not have to be saved/restored around the barriers of the
+    // i loop like a private array would.
+    using FCiBuffer         = StaticLocalStorage<float, c_superClusterSize * c_clSizeSq>;
+    auto sm_fCiXHostStorage = FCiBuffer::makeHostStorage(cgh);
+    auto sm_fCiYHostStorage = FCiBuffer::makeHostStorage(cgh);
+    auto sm_fCiZHostStorage = FCiBuffer::makeHostStorage(cgh);
+
     /* Flag to control the calculation of exclusion forces in the kernel
      * We do that with Ewald (elec/vdw) and RF. Cut-off only has exclusion for energy terms. */
     constexpr bool doExclusionForces =
@@ -810,6 +820,9 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         typename AtomTypeI::DeviceStorage       sm_atomTypeIDeviceStorage;
         typename LjCombI::DeviceStorage         sm_ljCombIDeviceStorage;
         typename ReductionBuffer::DeviceStorage sm_reductionBufferDeviceStorage;
+        typename FCiBuffer::DeviceStorage       sm_fCiXDeviceStorage;
+        typename FCiBuffer::DeviceStorage       sm_fCiYDeviceStorage;
+        typename FCiBuffer::DeviceStorage       sm_fCiZDeviceStorage;
         typename PrunedPairCount::DeviceStorage sm_prunedPairCountDeviceStorage;
         // Extract the valid pointer to local storage
         sycl::local_ptr<float>  sm_xq = Xq::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
@@ -845,12 +858,20 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         auto fCiBufY = [&](auto i) -> float& { return fCiBuf_[i][YY]; };
         auto fCiBufZ = [&](auto i) -> float& { return fCiBuf_[i][ZZ]; };
 #else
-        float fCiBufX_[c_superClusterSize] = { 0.0F }; // i force buffer
-        float fCiBufY_[c_superClusterSize] = { 0.0F }; // i force buffer
-        float fCiBufZ_[c_superClusterSize] = { 0.0F }; // i force buffer
-        auto  fCiBufX                      = [&](auto i) -> float& { return fCiBufX_[i]; };
-        auto  fCiBufY                      = [&](auto i) -> float& { return fCiBufY_[i]; };
-        auto  fCiBufZ                      = [&](auto i) -> float& { return fCiBufZ_[i]; };
+        // i force buffers in local memory, see FCiBuffer.
+        sycl::local_ptr<float> sm_fCiX = FCiBuffer::get_pointer(sm_fCiXHostStorage, sm_fCiXDeviceStorage);
+        sycl::local_ptr<float> sm_fCiY = FCiBuffer::get_pointer(sm_fCiYHostStorage, sm_fCiYDeviceStorage);
+        sycl::local_ptr<float> sm_fCiZ = FCiBuffer::get_pointer(sm_fCiZHostStorage, sm_fCiZDeviceStorage);
+        #pragma clang loop unroll(disable)
+        for (int i = 0; i < c_superClusterSize; i++)
+        {
+            sm_fCiX[i * c_clSizeSq + tidx] = 0.0F;
+            sm_fCiY[i * c_clSizeSq + tidx] = 0.0F;
+            sm_fCiZ[i * c_clSizeSq + tidx] = 0.0F;
+        }
+        auto fCiBufX = [&](auto i) -> float& { return sm_fCiX[i * c_clSizeSq + tidx]; };
+        auto fCiBufY = [&](auto i) -> float& { return sm_fCiY[i * c_clSizeSq + tidx]; };
+        auto fCiBufZ = [&](auto i) -> float& { return sm_fCiZ[i * c_clSizeSq + tidx]; };
 #endif
 
         const nbnxm_sci_t nbSci          = gm_plistSci[bidx];
@@ -1019,7 +1040,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 {
                     continue;
                 }
-                unsigned  maskJI = (1U << (jm * c_superClusterSize));
+                const unsigned maskJI = (1U << (jm * c_superClusterSize));
                 const int cj     = *indexedAddress(gm_plistCJPacked[jPacked].cj, jm);
                 const int aj     = cj * c_clSize + tidxj;
 
@@ -1039,15 +1060,29 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                     atomTypeJ = *indexedAddress(gm_atomTypes, aj);
                 }
 
-                Float3 fCjBuf(0.0F, 0.0F, 0.0F);
+                // The j-force accumulator as 3 floats (instead of a Float3): it is carried across
+                // the iterations of the i loop, and as separate scalars it is handled (context saved
+                // and vectorized) better by PoCL than a small aggregate.
+                float fCjX = 0.0F;
+                float fCjY = 0.0F;
+                float fCjZ = 0.0F;
 
-                // PLAN B: the i loop is unrolled and its body is branchless, so that the
-                // work-item loop around it is innermost and its memory accesses unconditional.
-#pragma unroll c_superClusterSize
+                // The i loop is not unrolled, and its body is branchless. PoCL then runs a
+                // vectorized work-item loop for each i-cluster, which keeps the loop body small (far
+                // less register spilling than with the fully unrolled loop).
+                #pragma clang loop unroll(disable)
                 for (int i = 0; i < c_superClusterSize; i++)
                 {
-                    // Instead of skipping the pair, compute it and mask the result.
-                    const bool pairInList = (imask & maskJI) != 0;
+                    // The interaction mask bit of this i-cluster, computed from i (not doubled in
+                    // every iteration), so that it is not a value carried across the iterations and
+                    // PoCL can see that it is uniform.
+                    const unsigned maskJIcur = maskJI << i;
+                    // Skip the i-cluster when the cluster pair is not in the list. imask is uniform
+                    // within the sub-group, and with the barrier at the end of the loop body each
+                    // i-cluster is its own work-item loop, so this branch is uniform and does not
+                    // hinder the vectorization. (pairInList is then always true inside.)
+                    const bool pairInList = (imask & maskJIcur) != 0;
+                    if (pairInList)
                     {
                         // i cluster index
                         const int ci = sci * c_superClusterSize + i;
@@ -1070,15 +1105,15 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                              * cluster-pair in imask gets set to 0. */
                             if (pairInList && !sycl::any_of_group(sg, r2 < rlistOuterSq))
                             {
-                                imask &= ~maskJI;
+                                imask &= ~maskJIcur;
                             }
                         }
-                        const float pairExclMask = (wexcl & maskJI) ? 1.0F : 0.0F;
+                        const float pairExclMask = (wexcl & maskJIcur) ? 1.0F : 0.0F;
 
                         // cutoff & exclusion check
 
                         const bool notExcluded = doExclusionForces ? (nonSelfInteraction | (ci != cj))
-                                                                   : (wexcl & maskJI);
+                                                                   : (wexcl & maskJIcur);
 
                         // The force and energy contributions are multiplied by this mask
                         // instead of branching on the condition.
@@ -1255,7 +1290,9 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             const Float3 forceIJ = rv * (fInvR * pairMask);
 
                             /* accumulate j forces in registers */
-                            fCjBuf -= forceIJ;
+                            fCjX -= forceIJ[0];
+                            fCjY -= forceIJ[1];
+                            fCjZ -= forceIJ[2];
                             /* accumulate i forces in registers */
 #if defined(__SYCL_DEVICE_ONLY__) && defined(__AMDGCN__)
                             fCiBuf_[i] += FCiFloat3(forceIJ);
@@ -1265,11 +1302,15 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             fCiBufZ(i) += forceIJ[2];
 #endif
                         } // (r2 < rCoulombSq) && notExcluded
-                    } // (imask & maskJI)
-                    /* shift the mask bit by 1 */
-                    maskJI += maskJI;
+                    } // (imask & maskJIcur)
+                    // A sub-group barrier at the end of the i loop body. With it the i loop is a
+                    // loop with a barrier, and PoCL runs each i-cluster as its own (vectorized)
+                    // sub-group work-item loop. Without it, the i loop would be inside the work-item
+                    // loop and nothing is vectorized across the work-items.
+                    sycl::group_barrier(sg);
                 } // for (int i = 0; i < c_nbnxmGpuNumClusterPerSupercluster; i++)
                 /* reduce j forces */
+                const Float3 fCjBuf(fCjX, fCjY, fCjZ);
                 reduceForceJ<useShuffleReductionForceJ>(
                         sm_reductionBuffer, fCjBuf, itemIdx, tidxi, tidxj, aj, gm_f, nonAtomicForces);
             } // for (int jm = 0; jm < c_nbnxmGpuJgroupSize; jm++)
