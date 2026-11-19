@@ -85,14 +85,18 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
     constexpr unsigned int superClInteractionMask = sc_superClInteractionMask(layoutType);
 
     // Local memory buffer for i x pre-loading.
-    // EXPERIMENT (SoA): x, y and z of the i-atoms are stored as separate arrays: component c of
-    // i-atom k is at [c * c_numIAtoms + k]. The work-items of a row (consecutive tidxi) then read
+    // EXPERIMENT (SoA): x, y and z of the i-atoms are stored as separate arrays (sm_xi, sm_yi,
+    // sm_zi). The work-items of a row (consecutive tidxi) then read
     // consecutive floats, which is one vector load when the work-items are vectorized (PoCL CPU).
     // q is not needed by the pruning.
     constexpr int c_numIAtoms   = c_superClusterSize * c_clSize;
-    using Xq                    = StaticLocalStorage<float, 3 * c_numIAtoms>;
+    using XqComponent           = StaticLocalStorage<float, c_numIAtoms>;
     using PrunedPairCount = StaticLocalStorage<int, 1, haveFreshList && nbnxmSortListsOnGpu()>;
-    auto sm_xqHostStorage = Xq::makeHostStorage(cgh);
+    // Separate arrays per component (not one array with an offset per component): the offset
+    // arithmetic becomes a bitwise "or" after SPIR-V, and the vectorizer then gathers the values.
+    auto sm_xiHostStorage = XqComponent::makeHostStorage(cgh);
+    auto sm_yiHostStorage = XqComponent::makeHostStorage(cgh);
+    auto sm_ziHostStorage = XqComponent::makeHostStorage(cgh);
     auto sm_prunedPairCountHostStorage = PrunedPairCount::makeHostStorage(cgh);
 
     // EXPERIMENT: buffer for combining the per-work-item range check bits over a sub-group, see
@@ -118,11 +122,15 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
     return [=](sycl::nd_item<3> itemIdx) [[sycl::reqd_sub_group_size(requiredSubGroupSize)]]
     {
         // These declarations work on the device.
-        typename Xq::DeviceStorage              sm_xqDeviceStorage;
+        typename XqComponent::DeviceStorage     sm_xiDeviceStorage;
+        typename XqComponent::DeviceStorage     sm_yiDeviceStorage;
+        typename XqComponent::DeviceStorage     sm_ziDeviceStorage;
         typename PrunedPairCount::DeviceStorage sm_prunedPairCountDeviceStorage;
         typename RangeBits::DeviceStorage       sm_rangeBitsDeviceStorage;
         // Extract the valid pointer to local storage
-        sycl::local_ptr<float> sm_xq = Xq::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
+        sycl::local_ptr<float> sm_xi = XqComponent::get_pointer(sm_xiHostStorage, sm_xiDeviceStorage);
+        sycl::local_ptr<float> sm_yi = XqComponent::get_pointer(sm_yiHostStorage, sm_yiDeviceStorage);
+        sycl::local_ptr<float> sm_zi = XqComponent::get_pointer(sm_ziHostStorage, sm_ziDeviceStorage);
         sycl::local_ptr<unsigned int> sm_rangeBits =
                 RangeBits::get_pointer(sm_rangeBitsHostStorage, sm_rangeBitsDeviceStorage);
         sycl::local_ptr<int>    sm_prunedPairCount = PrunedPairCount::get_pointer(
@@ -174,9 +182,9 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
                 const Float4 xq       = gm_xq[ai];
                 const Float3 shift    = gm_shiftVec[nbSci.shift];
                 const int    cacheIdx = (tidxj + i) * c_clSize + tidxi;
-                sm_xq[0 * c_numIAtoms + cacheIdx] = xq[0] + shift[0];
-                sm_xq[1 * c_numIAtoms + cacheIdx] = xq[1] + shift[1];
-                sm_xq[2 * c_numIAtoms + cacheIdx] = xq[2] + shift[2];
+                sm_xi[cacheIdx] = xq[0] + shift[0];
+                sm_yi[cacheIdx] = xq[1] + shift[1];
+                sm_zi[cacheIdx] = xq[2] + shift[2];
             }
         }
         /* Initialise one int for reducing prunedPairCount over warps */
@@ -259,9 +267,9 @@ auto nbnxmKernelPruneOnly(CommandGroupHandler cgh,
                         {
                             // load i-cluster coordinates from shmem
                             const int iAtomIdx = i * c_clSize + tidxi;
-                            Float3 rv(sm_xq[0 * c_numIAtoms + iAtomIdx],
-                                      sm_xq[1 * c_numIAtoms + iAtomIdx],
-                                      sm_xq[2 * c_numIAtoms + iAtomIdx]);
+                            Float3 rv(sm_xi[iAtomIdx],
+                                      sm_yi[iAtomIdx],
+                                      sm_zi[iAtomIdx]);
                             rv -= xj;
                             const float r2 = norm2(rv);
                             rangeBits |= (r2 < rlistInnerSq ? 1U : 0U) << i;

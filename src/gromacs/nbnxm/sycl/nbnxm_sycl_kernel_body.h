@@ -758,19 +758,25 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
             && !(numReductionSteps == 1 && c_avoidFloatingPointAtomics(sc_layoutType));
     constexpr bool useShuffleReductionForceJ = gmx::isPowerOfTwo(c_superClusterSize);
 
-    // Local memory buffer for i x+q pre-loading.
-    // EXPERIMENT (SoA): the i-atom data is stored as separate arrays per component, x, y, z and q
-    // for xq, and the two LJ combination parameters for ljComb: component c of i-atom k is at
-    // [c * c_numIAtoms + k]. The work-items of a row (consecutive tidxi) then read consecutive
-    // floats, which is one vector load when the work-items are vectorized (e.g. PoCL CPU). With the
-    // Float4/Float2 array-of-structures layout the compiler has to transpose the data.
+    // Local memory buffers for i x+q pre-loading.
+    // SoA: x, y, z and q of the i-atoms are separate local arrays (likewise the two LJ combination
+    // parameters). The work-items of a row (consecutive tidxi) then read consecutive floats, which
+    // is one vector load when the work-items are vectorized (PoCL CPU). They are separate arrays
+    // instead of one array with an offset per component on purpose: the offset arithmetic
+    // (c * c_numIAtoms + k) gets turned into a bitwise "or" on the way through SPIR-V (which loses
+    // the "disjoint" information), and then the vectorizer can not see the addresses are
+    // consecutive and gathers the values.
     constexpr int c_numIAtoms = c_superClusterSize * c_clSize;
-    using Xq                  = StaticLocalStorage<float, 4 * c_numIAtoms>;
+    using XqComponent         = StaticLocalStorage<float, c_numIAtoms>;
     using AtomTypeI           = StaticLocalStorage<int, c_numIAtoms, !props.vdwComb>;
-    using LjCombI             = StaticLocalStorage<float, 2 * c_numIAtoms, props.vdwComb>;
-    auto sm_xqHostStorage        = Xq::makeHostStorage(cgh);
+    using LjCombIComponent    = StaticLocalStorage<float, c_numIAtoms, props.vdwComb>;
+    auto sm_xiHostStorage        = XqComponent::makeHostStorage(cgh);
+    auto sm_yiHostStorage        = XqComponent::makeHostStorage(cgh);
+    auto sm_ziHostStorage        = XqComponent::makeHostStorage(cgh);
+    auto sm_qiHostStorage        = XqComponent::makeHostStorage(cgh);
     auto sm_atomTypeIHostStorage = AtomTypeI::makeHostStorage(cgh);
-    auto sm_ljCombIHostStorage   = LjCombI::makeHostStorage(cgh);
+    auto sm_ljCombI0HostStorage  = LjCombIComponent::makeHostStorage(cgh);
+    auto sm_ljCombI1HostStorage  = LjCombIComponent::makeHostStorage(cgh);
 
     /* Local memory buffer for force and energy reduction.
      * For i- and j-force reduction, we need DIM elements for each thread.
@@ -816,20 +822,29 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
         }
 
         // These declarations work on the device.
-        typename Xq::DeviceStorage              sm_xqDeviceStorage;
+        typename XqComponent::DeviceStorage     sm_xiDeviceStorage;
+        typename XqComponent::DeviceStorage     sm_yiDeviceStorage;
+        typename XqComponent::DeviceStorage     sm_ziDeviceStorage;
+        typename XqComponent::DeviceStorage     sm_qiDeviceStorage;
         typename AtomTypeI::DeviceStorage       sm_atomTypeIDeviceStorage;
-        typename LjCombI::DeviceStorage         sm_ljCombIDeviceStorage;
+        typename LjCombIComponent::DeviceStorage sm_ljCombI0DeviceStorage;
+        typename LjCombIComponent::DeviceStorage sm_ljCombI1DeviceStorage;
         typename ReductionBuffer::DeviceStorage sm_reductionBufferDeviceStorage;
         typename FCiBuffer::DeviceStorage       sm_fCiXDeviceStorage;
         typename FCiBuffer::DeviceStorage       sm_fCiYDeviceStorage;
         typename FCiBuffer::DeviceStorage       sm_fCiZDeviceStorage;
         typename PrunedPairCount::DeviceStorage sm_prunedPairCountDeviceStorage;
         // Extract the valid pointer to local storage
-        sycl::local_ptr<float>  sm_xq = Xq::get_pointer(sm_xqHostStorage, sm_xqDeviceStorage);
+        sycl::local_ptr<float> sm_xi = XqComponent::get_pointer(sm_xiHostStorage, sm_xiDeviceStorage);
+        sycl::local_ptr<float> sm_yi = XqComponent::get_pointer(sm_yiHostStorage, sm_yiDeviceStorage);
+        sycl::local_ptr<float> sm_zi = XqComponent::get_pointer(sm_ziHostStorage, sm_ziDeviceStorage);
+        sycl::local_ptr<float> sm_qi = XqComponent::get_pointer(sm_qiHostStorage, sm_qiDeviceStorage);
         sycl::local_ptr<int>    sm_atomTypeI =
                 AtomTypeI::get_pointer(sm_atomTypeIHostStorage, sm_atomTypeIDeviceStorage);
-        sycl::local_ptr<float> sm_ljCombI =
-                LjCombI::get_pointer(sm_ljCombIHostStorage, sm_ljCombIDeviceStorage);
+        sycl::local_ptr<float> sm_ljCombI0 =
+                LjCombIComponent::get_pointer(sm_ljCombI0HostStorage, sm_ljCombI0DeviceStorage);
+        sycl::local_ptr<float> sm_ljCombI1 =
+                LjCombIComponent::get_pointer(sm_ljCombI1HostStorage, sm_ljCombI1DeviceStorage);
         sycl::local_ptr<float> sm_reductionBuffer = ReductionBuffer::get_pointer(
                 sm_reductionBufferHostStorage, sm_reductionBufferDeviceStorage);
         sycl::local_ptr<int> sm_prunedPairCount = PrunedPairCount::get_pointer(
@@ -900,10 +915,10 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 Float4       xqi   = gm_xq[ai];
                 xqi += Float4(shift[0], shift[1], shift[2], 0.0F);
                 xqi[3] *= epsFac;
-                sm_xq[0 * c_numIAtoms + cacheIdx] = xqi[0];
-                sm_xq[1 * c_numIAtoms + cacheIdx] = xqi[1];
-                sm_xq[2 * c_numIAtoms + cacheIdx] = xqi[2];
-                sm_xq[3 * c_numIAtoms + cacheIdx] = xqi[3];
+                sm_xi[cacheIdx] = xqi[0];
+                sm_yi[cacheIdx] = xqi[1];
+                sm_zi[cacheIdx] = xqi[2];
+                sm_qi[cacheIdx] = xqi[3];
 
                 if constexpr (!props.vdwComb)
                 {
@@ -914,8 +929,8 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                 {
                     // Pre-load the LJ combination parameters into shared memory
                     const Float2 ljCombI                  = gm_ljComb[ai];
-                    sm_ljCombI[0 * c_numIAtoms + cacheIdx] = ljCombI[0];
-                    sm_ljCombI[1 * c_numIAtoms + cacheIdx] = ljCombI[1];
+                    sm_ljCombI0[cacheIdx] = ljCombI[0];
+                    sm_ljCombI1[cacheIdx] = ljCombI[1];
                 }
             }
         }
@@ -955,7 +970,7 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                     // TODO: Are there other options?
                     if constexpr (props.elecEwald || props.elecRF || props.elecCutoff)
                     {
-                        const float qi = sm_xq[3 * c_numIAtoms + i * c_clSize + tidxi];
+                        const float qi = sm_qi[i * c_clSize + tidxi];
                         energyElec += qi * qi;
                     }
                     if constexpr (props.vdwEwald)
@@ -1088,10 +1103,10 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                         const int ci = sci * c_superClusterSize + i;
                         // all threads load an atom from i cluster ci into shmem!
                         const int    iAtomIdx = i * c_clSize + tidxi;
-                        const Float4 xqi(sm_xq[0 * c_numIAtoms + iAtomIdx],
-                                         sm_xq[1 * c_numIAtoms + iAtomIdx],
-                                         sm_xq[2 * c_numIAtoms + iAtomIdx],
-                                         sm_xq[3 * c_numIAtoms + iAtomIdx]);
+                        const Float4 xqi(sm_xi[iAtomIdx],
+                                         sm_yi[iAtomIdx],
+                                         sm_zi[iAtomIdx],
+                                         sm_qi[iAtomIdx]);
                         const Float3 xi(xqi[0], xqi[1], xqi[2]);
 
                         // distance between i and j atoms
@@ -1134,8 +1149,8 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
                             else
                             {
                                 const Float2 ljCombI(
-                                        sm_ljCombI[0 * c_numIAtoms + i * c_clSize + tidxi],
-                                        sm_ljCombI[1 * c_numIAtoms + i * c_clSize + tidxi]);
+                                        sm_ljCombI0[i * c_clSize + tidxi],
+                                        sm_ljCombI1[i * c_clSize + tidxi]);
                                 if constexpr (props.vdwCombGeom)
                                 {
                                     c6c12 = Float2(ljCombI[0] * ljCombJ[0], ljCombI[1] * ljCombJ[1]);
