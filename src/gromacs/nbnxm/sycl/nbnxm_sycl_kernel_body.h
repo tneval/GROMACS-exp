@@ -756,7 +756,13 @@ static auto nbnxmKernel(CommandGroupHandler cgh,
     constexpr bool useShuffleReductionForceI =
             (numReductionSteps <= 3) && (c_clSize == 8 || c_clSize == 4)
             && !(numReductionSteps == 1 && c_avoidFloatingPointAtomics(sc_layoutType));
-    constexpr bool useShuffleReductionForceJ = gmx::isPowerOfTwo(c_superClusterSize);
+    // The j-forces are reduced through local memory (reduceForceJGeneric: one sub-group barrier
+    // and a short loop) instead of with sub-group shifts. On PoCL CPU each shift is a sub-group
+    // barrier plus a round trip through local memory, and with scalable vectors (RISC-V) the
+    // shifts become indexed gathers. Measured on x86 PoCL (4x4, no split): ~9% faster.
+    // On GPUs the shuffle reduction is usually preferable:
+    //     gmx::isPowerOfTwo(c_superClusterSize)
+    constexpr bool useShuffleReductionForceJ = false;
 
     // Local memory buffers for i x+q pre-loading.
     // SoA: x, y, z and q of the i-atoms are separate local arrays (likewise the two LJ combination
